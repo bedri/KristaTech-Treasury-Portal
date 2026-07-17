@@ -113,7 +113,7 @@ export default defineEventHandler(async (event) => {
     // Check if Quorum Rotation is active
     let fRotationActive = false
     if (chain === 'main') {
-      fRotationActive = (currentHeight >= 3000)
+      fRotationActive = (currentHeight >= 1400)
     } else if (chain === 'test') {
       fRotationActive = (currentHeight >= 1000)
     } else { // regtest
@@ -200,6 +200,7 @@ export default defineEventHandler(async (event) => {
 
     return {
       success: true,
+      chain,
       currentHeight,
       dkgHeight,
       seedHeight,

@@ -239,6 +239,8 @@ import elliptic from 'elliptic'
 const ec = new elliptic.ec('secp256k1')
 const toast = useToast()
 
+const networkState = useState('network', () => 'main')
+
 const quorumData = ref(null)
 const quorumLoading = ref(true)
 
@@ -260,6 +262,7 @@ async function fetchQuorum() {
     const res = await $fetch('/api/quorum')
     if (res.success) {
       quorumData.value = res
+      networkState.value = res.chain
       // If regtest/test, threshold is 2
       threshold.value = (res.members.length < 5) ? 2 : 4
     }

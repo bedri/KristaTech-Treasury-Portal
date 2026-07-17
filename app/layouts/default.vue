@@ -31,7 +31,7 @@
           <span class="text-slate-700">|</span>
           <span class="flex items-center gap-1.5 text-xs text-green-400 bg-green-950/40 border border-green-800/30 px-2.5 py-1 rounded-full">
             <span class="w-1.5 h-1.5 bg-green-400 rounded-full animate-ping"></span>
-            Testnet Bağlı
+            {{ networkName }} Bağlı
           </span>
         </div>
       </div>
@@ -57,3 +57,13 @@
     </footer>
   </div>
 </template>
+
+<script setup>
+const networkState = useState('network', () => 'main')
+
+const networkName = computed(() => {
+  if (networkState.value === 'test') return 'Testnet'
+  if (networkState.value === 'regtest') return 'Regtest'
+  return 'Mainnet'
+})
+</script>
