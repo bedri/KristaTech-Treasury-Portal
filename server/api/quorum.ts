@@ -110,12 +110,28 @@ export default defineEventHandler(async (event) => {
     const currentHeight = blockChainInfo.blocks
     const chain = blockChainInfo.chain
 
+    // Check if Quorum Rotation is active
+    let fRotationActive = false
+    if (chain === 'main') {
+      fRotationActive = (currentHeight >= 3000)
+    } else if (chain === 'test') {
+      fRotationActive = (currentHeight >= 1000)
+    } else { // regtest
+      fRotationActive = (currentHeight >= 800)
+    }
+
     // Determine DKG height interval
     const dkgInterval = (chain === 'regtest' || chain === 'test') ? 10 : 100
-    const dkgHeight = Math.floor(currentHeight / dkgInterval) * dkgInterval
+    
+    let dkgHeight = Math.floor(currentHeight / dkgInterval) * dkgInterval
+    let seedHeight = dkgHeight - 1
 
-    // ElectQuorumMembers uses seed at dkgHeight - 1
-    const seedHeight = dkgHeight - 1
+    if (fRotationActive) {
+      dkgHeight = currentHeight
+      const epochHeight = Math.floor(currentHeight / dkgInterval) * dkgInterval
+      seedHeight = epochHeight - 1
+    }
+
     const seedBuffer = await getAdamSeed(seedHeight)
     const seedHex = Buffer.from(seedBuffer).reverse().toString('hex')
 
@@ -143,9 +159,25 @@ export default defineEventHandler(async (event) => {
     // Sort by score ascending (lowest score is ranked highest)
     scoredMns.sort((a: any, b: any) => a.score.localeCompare(b.score))
 
-    // Select the top 5 members and mask their IP addresses to prevent DDoS/DoS harvesting
-    const quorumMembers = scoredMns.slice(0, 5).map((item: any) => {
-      const mnCopy = { ...item.mn }
+    // Select members using sliding window or standard behavior
+    let selectedMns = []
+    if (fRotationActive) {
+      const M = scoredMns.length
+      if (M >= 5) {
+        const offset = currentHeight
+        for (let i = 0; i < 5; ++i) {
+          selectedMns.push(scoredMns[(offset + i) % M].mn)
+        }
+      } else {
+        selectedMns = scoredMns.map((item: any) => item.mn)
+      }
+    } else {
+      selectedMns = scoredMns.slice(0, 5).map((item: any) => item.mn)
+    }
+
+    // Mask their IP addresses to prevent DDoS/DoS harvesting
+    const quorumMembers = selectedMns.map((mn: any) => {
+      const mnCopy = { ...mn }
       if (mnCopy.ip) {
         const parts = mnCopy.ip.split(':')
         const ipPart = parts[0]
