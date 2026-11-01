@@ -5,8 +5,8 @@ import elliptic from 'elliptic'
 
 const ec = new elliptic.ec('secp256k1')
 
-const RPC_URL = 'http://127.0.0.1:27979'
-const RPC_AUTH = Buffer.from('kristarpc:kristarpcpass').toString('base64')
+const RPC_URL = process.env.NUXT_RPC_URL || 'http://127.0.0.1:27998'
+const RPC_AUTH = Buffer.from(`${process.env.NUXT_RPC_USER || 'kristarpc'}:${process.env.NUXT_RPC_PASSWORD || 'kristapassword'}`).toString('base64')
 const DATA_FILE = path.join('/home/bedri/Coin-Projects/KristaTech-Treasury-Portal', 'proposals.json')
 
 async function callRpc(method: string, params: any[] = []) {
@@ -140,8 +140,16 @@ export default defineEventHandler(async (event) => {
       if (!rawTxHex || !txHash || !targetAddress || !amount) {
         return { success: false, error: 'Missing parameters' }
       }
+      if (typeof rawTxHex !== 'string' || rawTxHex.length > 200000 || !/^[0-9a-fA-F]+$/.test(rawTxHex) ||
+          typeof txHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txHash)) {
+        return { success: false, error: 'Invalid rawTxHex or txHash format/size' }
+      }
 
       const proposals = readProposals()
+      const pendingCount = proposals.filter((p: any) => p.status === 'pending').length
+      if (pendingCount >= 50) {
+        return { success: false, error: 'Maximum pending proposals limit (50) reached' }
+      }
       const newProposal = {
         id: crypto.randomUUID(),
         rawTxHex,
@@ -206,7 +214,7 @@ export default defineEventHandler(async (event) => {
       // Check threshold
       const blockChainInfo = await callRpc('getblockchaininfo')
       const chain = blockChainInfo.chain
-      const threshold = (chain === 'regtest' || chain === 'test') ? 2 : 4 // 4 out of 5 for mainnet
+      const threshold = (chain === 'regtest') ? 2 : 3 // 3 out of 5 majority for mainnet/testnet
 
       if (proposal.signatures.length >= threshold) {
         // Aggregate quorum signature

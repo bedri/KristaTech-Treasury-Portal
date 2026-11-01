@@ -1,7 +1,7 @@
 import crypto from 'crypto'
 
-const RPC_URL = 'http://127.0.0.1:27979'
-const RPC_AUTH = Buffer.from('kristarpc:kristarpcpass').toString('base64')
+const RPC_URL = process.env.NUXT_RPC_URL || 'http://127.0.0.1:27998'
+const RPC_AUTH = Buffer.from(`${process.env.NUXT_RPC_USER || 'kristarpc'}:${process.env.NUXT_RPC_PASSWORD || 'kristapassword'}`).toString('base64')
 
 async function callRpc(method: string, params: any[] = []) {
   const response = await fetch(RPC_URL, {
@@ -159,21 +159,8 @@ export default defineEventHandler(async (event) => {
     // Sort by score ascending (lowest score is ranked highest)
     scoredMns.sort((a: any, b: any) => a.score.localeCompare(b.score))
 
-    // Select members using sliding window or standard behavior
-    let selectedMns = []
-    if (fRotationActive) {
-      const M = scoredMns.length
-      if (M >= 5) {
-        const offset = currentHeight
-        for (let i = 0; i < 5; ++i) {
-          selectedMns.push(scoredMns[(offset + i) % M].mn)
-        }
-      } else {
-        selectedMns = scoredMns.map((item: any) => item.mn)
-      }
-    } else {
-      selectedMns = scoredMns.slice(0, 5).map((item: any) => item.mn)
-    }
+    // Select top 5 members (standard DKG behavior matching src/llmq.cpp:ElectQuorumMembers)
+    const selectedMns = scoredMns.slice(0, 5).map((item: any) => item.mn)
 
     // Mask their IP addresses to prevent DDoS/DoS harvesting
     const quorumMembers = selectedMns.map((mn: any) => {

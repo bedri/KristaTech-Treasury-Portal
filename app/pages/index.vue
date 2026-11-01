@@ -247,7 +247,7 @@ const quorumLoading = ref(true)
 const proposals = ref([])
 const proposalsLoading = ref(true)
 
-const threshold = ref(4) // Default to mainnet 4/5
+const threshold = ref(3) // Default to 3/5 majority
 
 const signForm = ref({
   selectedMnIndex: '',
@@ -263,8 +263,8 @@ async function fetchQuorum() {
     if (res.success) {
       quorumData.value = res
       networkState.value = res.chain
-      // If regtest/test, threshold is 2
-      threshold.value = (res.members.length < 5) ? 2 : 4
+      // Majority threshold: 3 for 5-member quorum, 2 for smaller regtest quorum
+      threshold.value = (res.members.length < 5) ? 2 : 3
     }
   } catch (err) {
     console.error('Error fetching quorum:', err)
