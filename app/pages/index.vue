@@ -173,9 +173,15 @@
           <div v-if="proposal.status === 'pending'" class="mt-6 border-t border-slate-800/50 pt-4 space-y-4">
             <div v-if="isUserInQuorum" class="bg-primary-950/20 border border-primary-800/40 rounded-lg p-3 text-xs text-primary-300">
               <div class="flex items-center gap-1 font-bold mb-1">
-                <UIcon name="i-heroicons-check-circle-20-solid" /> Tebrikler! Masternode'unuz Aktif Quorum Üyesi
+                <UIcon name="i-heroicons-check-circle-20-solid" /> Tebrikler! Masternode'unuz Aktif Quorum Üyesi (Sıra #{{ matchedQuorumMemberIndex + 1 }})
               </div>
-              Bu teklifi onaylamak için aşağıya ilgili masternode'un özel anahtarını girerek tarayıcınızda imzalayabilirsiniz.
+              Girdiğiniz WIF anahtarı aktif kuorumdaki masternode ile eşleşti. Aşağıdaki butonla teklifi tarayıcınızda imzalayabilirsiniz.
+            </div>
+            <div v-else class="bg-slate-950/40 border border-slate-800/60 rounded-lg p-3 text-xs text-slate-400">
+              <div class="flex items-center gap-1 font-bold text-slate-300 mb-1">
+                <UIcon name="i-heroicons-key-20-solid" /> Aktif Quorum Üyesi Masternode İmza Alanı
+              </div>
+              Masternode'unuz aktif kuorumdaysa listeden seçip özel anahtarınızı (WIF) girerek bu teklifi tarayıcınızda imzalayabilirsiniz.
             </div>
 
             <div class="flex flex-col gap-2">
@@ -289,9 +295,34 @@ async function fetchProposals() {
   }
 }
 
-// Check if user is in quorum
+// Check if the entered WIF key matches one of the 5 active quorum members
+const matchedQuorumMemberIndex = computed(() => {
+  if (!quorumData.value || !Array.isArray(quorumData.value.members) || !signForm.value.wifKey) {
+    return -1
+  }
+  try {
+    const privKeyHex = getRawPrivateKeyFromWIF(signForm.value.wifKey.trim())
+    const key = ec.keyFromPrivate(privKeyHex, 'hex')
+    const compressedPub = key.getPublic(true, 'hex').toLowerCase()
+    const uncompressedPub = key.getPublic(false, 'hex').toLowerCase()
+    return quorumData.value.members.findIndex((mn) => {
+      const mnPub = String(mn.pubkey || '').toLowerCase()
+      return mnPub === compressedPub || mnPub === uncompressedPub
+    })
+  } catch {
+    return -1
+  }
+})
+
+watch(matchedQuorumMemberIndex, (idx) => {
+  if (idx !== -1) {
+    signForm.value.selectedMnIndex = idx
+  }
+})
+
+// True only when the user has entered a valid WIF key belonging to an active quorum member
 const isUserInQuorum = computed(() => {
-  return quorumData.value && quorumData.value.members && quorumData.value.members.length > 0
+  return matchedQuorumMemberIndex.value !== -1
 })
 
 // Quorum options for select
@@ -334,11 +365,20 @@ function decodeBase58(string) {
 
 function getRawPrivateKeyFromWIF(wifString) {
   const decoded = decodeBase58(wifString)
-  // wif is: [prefix (1 byte)] [privkey (32 bytes)] [optional compression (1 byte)] [checksum (4 bytes)]
-  // We extract the 32-byte private key at index 1 to 33
+  // WIF is: [prefix (1B)] [privkey (32B)] [optional compression flag 0x01 (1B)] [checksum (4B)]
+  if (decoded.length !== 37 && (decoded.length !== 38 || decoded[33] !== 0x01)) {
+    throw new Error('Geçersiz WIF uzunluğu veya sıkıştırma bayrağı')
+  }
+  const payload = decoded.slice(0, decoded.length - 4)
+  const checksum = decoded.slice(decoded.length - 4)
+  const expectedChecksum = sha256(sha256(payload)).slice(0, 4)
+  for (let i = 0; i < 4; i++) {
+    if (checksum[i] !== expectedChecksum[i]) {
+      throw new Error('WIF Base58Check sağlama toplamı (checksum) geçersiz')
+    }
+  }
+
   const rawKey = decoded.slice(1, 33)
-  
-  // Convert rawKey bytes to hex string for elliptic
   let hex = ''
   for (let i = 0; i < rawKey.length; i++) {
     hex += rawKey[i].toString(16).padStart(2, '0')

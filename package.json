@@ -4,9 +4,9 @@
   "private": true,
   "scripts": {
     "build": "nuxt build",
-    "dev": "nuxt dev",
+    "dev": "HOST=127.0.0.1 NITRO_HOST=127.0.0.1 nuxt dev",
     "generate": "nuxt generate",
-    "preview": "nuxt preview",
+    "preview": "HOST=127.0.0.1 NITRO_HOST=127.0.0.1 PORT=3000 NITRO_PORT=3000 nuxt preview",
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
