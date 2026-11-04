@@ -123,9 +123,14 @@ function maskIpAddress(ip: string | undefined): string {
 
 export default defineEventHandler(async (event) => {
   try {
-    // Prefer consensus-direct getactivequorum RPC from kristatechd (SEC-12 compliant)
+    const blockChainInfo = await callRpc('getblockchaininfo')
+    const currentHeight = blockChainInfo.blocks
+    const targetHeight = currentHeight + 1 // CheckInputs & ConnectBlock verify at nSpendHeight = H + 1
+    const chain = blockChainInfo.chain
+
+    // Prefer consensus-direct getactivequorum RPC from kristatechd at targetHeight = currentHeight + 1 (SEC-12 compliant)
     try {
-      const activeQuorum = await callRpc('getactivequorum')
+      const activeQuorum = await callRpc('getactivequorum', [targetHeight])
       if (activeQuorum && Array.isArray(activeQuorum.members)) {
         const maskedMembers = activeQuorum.members.map((mn: any) => ({
           ...mn,
@@ -135,6 +140,7 @@ export default defineEventHandler(async (event) => {
           success: true,
           chain: activeQuorum.chain,
           currentHeight: activeQuorum.currentHeight,
+          targetHeight: activeQuorum.targetHeight ?? targetHeight,
           dkgHeight: activeQuorum.dkgHeight,
           seedHeight: activeQuorum.seedHeight,
           seed: activeQuorum.seed,
@@ -146,29 +152,25 @@ export default defineEventHandler(async (event) => {
       // Fallback to manual RPC composition if connected to an older daemon without getactivequorum
     }
 
-    const blockChainInfo = await callRpc('getblockchaininfo')
-    const currentHeight = blockChainInfo.blocks
-    const chain = blockChainInfo.chain
-
-    // Check if Quorum Rotation is active
+    // Check if Quorum Rotation is active at targetHeight (H + 1)
     let fRotationActive = false
     if (chain === 'main') {
-      fRotationActive = (currentHeight >= 1400)
+      fRotationActive = (targetHeight >= 1400)
     } else if (chain === 'test') {
-      fRotationActive = (currentHeight >= 1000)
+      fRotationActive = (targetHeight >= 1000)
     } else { // regtest
-      fRotationActive = (currentHeight >= 800)
+      fRotationActive = (targetHeight >= 800)
     }
 
     // Determine DKG height interval
     const dkgInterval = (chain === 'regtest' || chain === 'test') ? 10 : 100
     
-    let dkgHeight = Math.floor(currentHeight / dkgInterval) * dkgInterval
+    let dkgHeight = Math.floor(targetHeight / dkgInterval) * dkgInterval
     let seedHeight = dkgHeight - 1
 
     if (fRotationActive) {
-      dkgHeight = currentHeight
-      const epochHeight = Math.floor(currentHeight / dkgInterval) * dkgInterval
+      dkgHeight = targetHeight
+      const epochHeight = Math.floor(targetHeight / dkgInterval) * dkgInterval
       seedHeight = epochHeight - 1
     }
 
@@ -232,6 +234,7 @@ export default defineEventHandler(async (event) => {
       success: true,
       chain,
       currentHeight,
+      targetHeight,
       dkgHeight,
       seedHeight,
       seed: seedHex,
