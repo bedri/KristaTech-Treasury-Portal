@@ -185,21 +185,26 @@ export default defineEventHandler(async (event) => {
 
     // SEC-12 fallback: when < 5 active masternodes exist, ElectQuorumMembers falls back to GetAdamMinerPool(nHeight - 1)
     if (enabledMns.length < 5) {
-      const adamMiners = await callRpc('getadamminers', [Math.max(0, dkgHeight - 1)]).catch(() => [])
-      const pool: string[] = Array.isArray(adamMiners?.pool) ? adamMiners.pool : (Array.isArray(adamMiners) ? adamMiners : [])
+      const adamMiners = await callRpc('getadamminers', []).catch(() => [])
+      const pool: any[] = Array.isArray(adamMiners?.pool) ? adamMiners.pool : (Array.isArray(adamMiners) ? adamMiners : [])
       if (pool.length > 0) {
-        enabledMns = pool.map((pubkeyHex: string, idx: number) => {
-          const pubkeyBytes = Buffer.from(pubkeyHex, 'hex')
-          const pseudoTxHash = doubleSha256(pubkeyBytes).reverse().toString('hex')
-          return {
-            rank: idx + 1,
-            txhash: pseudoTxHash,
-            outidx: idx,
-            pubkey: pubkeyHex,
-            status: 'ENABLED',
-            ip: `ADAM-Miner #${idx + 1}`
-          }
-        })
+        enabledMns = pool
+          .map((entry: any, idx: number) => {
+            const pubkeyHex = typeof entry === 'string' ? entry : String(entry?.pubkey || '')
+            if (!pubkeyHex) return null
+            const pubkeyBytes = Buffer.from(pubkeyHex, 'hex')
+            const pseudoTxHash = doubleSha256(pubkeyBytes).reverse().toString('hex')
+            return {
+              rank: idx + 1,
+              txhash: pseudoTxHash,
+              outidx: typeof entry?.index === 'number' ? entry.index : idx,
+              pubkey: pubkeyHex,
+              addr: typeof entry?.address === 'string' ? entry.address : undefined,
+              status: 'ENABLED',
+              ip: `ADAM-Miner #${idx + 1}`
+            }
+          })
+          .filter(Boolean)
       }
     }
 
