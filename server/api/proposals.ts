@@ -2,8 +2,15 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import elliptic from 'elliptic'
+import { bls12_381 } from '@noble/curves/bls12-381'
 
 const ec = new elliptic.ec('secp256k1')
+const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
+
+function doubleSha256(buf: Buffer): Buffer {
+  const h1 = crypto.createHash('sha256').update(buf).digest()
+  return crypto.createHash('sha256').update(h1).digest()
+}
 
 const RPC_URL = process.env.NUXT_RPC_URL || 'http://127.0.0.1:27998'
 const RPC_AUTH = Buffer.from(`${process.env.NUXT_RPC_USER || 'kristarpc'}:${process.env.NUXT_RPC_PASSWORD || 'kristapassword'}`).toString('base64')
@@ -101,6 +108,91 @@ function getPushDataPrefix(length: number): Buffer {
   }
 }
 
+// Helper to deserialize and verify CBLSSignedData (blsPubKey[48] + blsSig[96] + compactSize + ecdsaSig)
+// matching CQuorumSignature::Verify in src/llmq.cpp:43-108
+function verifyAndParseBLSSignedData(
+  sigHex: string,
+  txHashHex: string,
+  memberPubkeyHex: string
+): { valid: boolean; error?: string; blsPubKey?: Uint8Array; blsSig?: Uint8Array } {
+  try {
+    const sigBuf = Buffer.from(sigHex, 'hex')
+    // Minimum size: 48 (G1 pubkey) + 96 (G2 sig) + 1 (compactSize) + 64 (ECDSA DER)
+    if (sigBuf.length < 209 || sigBuf.length > 512) {
+      return { valid: false, error: `Invalid CBLSSignedData byte length (${sigBuf.length}); expected 48B blsPubKey + 96B blsSig + DER ecdsaSig` }
+    }
+
+    const blsPubKey = sigBuf.subarray(0, 48)
+    const blsSig = sigBuf.subarray(48, 144)
+    const ecdsaLenInfo = readCompactSize(sigBuf, 144)
+    const expectedTotal = 144 + ecdsaLenInfo.size + ecdsaLenInfo.value
+    if (expectedTotal !== sigBuf.length || ecdsaLenInfo.value === 0) {
+      return { valid: false, error: 'Malformed CBLSSignedData compactSize for ecdsaSig' }
+    }
+    const ecdsaSig = sigBuf.subarray(144 + ecdsaLenInfo.size, expectedTotal)
+
+    // 1. Verify ECDSA signature by memberPubKey over Hash(blsPubKey) (double-SHA256)
+    const hashPubKey = doubleSha256(blsPubKey)
+    const key = ec.keyFromPublic(memberPubkeyHex, 'hex')
+    if (!key.verify(hashPubKey, ecdsaSig)) {
+      return { valid: false, error: 'Invalid Masternode ECDSA authorization signature over Hash(blsPubKey)' }
+    }
+
+    // 2. Verify BLS12-381 signature over blockHash.begin() (32-byte little-endian internal uint256)
+    const msgBlockHash = new Uint8Array(Buffer.from(txHashHex, 'hex').reverse())
+    const blsOk = bls12_381.verify(new Uint8Array(blsSig), msgBlockHash, new Uint8Array(blsPubKey), { DST: BLS_DST })
+    if (!blsOk) {
+      return { valid: false, error: 'Invalid BLS12-381 signature over proposal txHash' }
+    }
+
+    return {
+      valid: true,
+      blsPubKey: new Uint8Array(blsPubKey),
+      blsSig: new Uint8Array(blsSig)
+    }
+  } catch (err: any) {
+    return { valid: false, error: `CBLSSignedData verification failed: ${err.message}` }
+  }
+}
+
+// Helper to append quorum signature push to all inputs of a serialized transaction
+function injectQuorumSigIntoRawTx(rawTxHex: string, qsigPush: Buffer): Buffer {
+  const txBuf = Buffer.from(rawTxHex, 'hex')
+  let offset = 0
+
+  // nVersion (4 bytes)
+  const version = txBuf.subarray(offset, offset + 4)
+  offset += 4
+
+  // vin count
+  const vinCountInfo = readCompactSize(txBuf, offset)
+  const vinCountBuf = txBuf.subarray(offset, offset + vinCountInfo.size)
+  offset += vinCountInfo.size
+
+  const parts: Buffer[] = [version, vinCountBuf]
+
+  for (let i = 0; i < vinCountInfo.value; i++) {
+    // prevout (32-byte hash + 4-byte index)
+    const prevout = txBuf.subarray(offset, offset + 36)
+    offset += 36
+
+    const scriptSigLenInfo = readCompactSize(txBuf, offset)
+    offset += scriptSigLenInfo.size
+    const originalScriptSig = txBuf.subarray(offset, offset + scriptSigLenInfo.value)
+    offset += scriptSigLenInfo.value
+
+    const nSequence = txBuf.subarray(offset, offset + 4)
+    offset += 4
+
+    const newScriptSig = Buffer.concat([originalScriptSig, qsigPush])
+    parts.push(prevout, writeCompactSize(newScriptSig.length), newScriptSig, nSequence)
+  }
+
+  // Remaining bytes (vout + nLockTime)
+  parts.push(txBuf.subarray(offset))
+  return Buffer.concat(parts)
+}
+
 // Helper to aggregate CQuorumSignature
 function serializeQuorumSignature(txHashHex: string, sigs: any[]): Buffer {
   const blockHashBuf = Buffer.from(txHashHex, 'hex').reverse()
@@ -188,25 +280,16 @@ export default defineEventHandler(async (event) => {
         return { success: false, error: 'Already signed by this masternode' }
       }
 
-      // Verify the signature on txHash using pubkey
-      try {
-        const pubkeyHex = pubkey
-        const msgHash = proposal.txHash
-        const key = ec.keyFromPublic(pubkeyHex, 'hex')
-        
-        // elliptic verify expects message as array or hex
-        const isValid = key.verify(msgHash, signature)
-        if (!isValid) {
-          return { success: false, error: 'Invalid ECDSA signature' }
-        }
-      } catch (err: any) {
-        return { success: false, error: `Signature verification failed: ${err.message}` }
+      // Verify hybrid BLS12-381 + secp256k1 signature (CBLSSignedData) matching src/llmq.cpp:Verify
+      const verifyResult = verifyAndParseBLSSignedData(signature, proposal.txHash, pubkey)
+      if (!verifyResult.valid) {
+        return { success: false, error: verifyResult.error || 'Invalid hybrid BLS12-381 + ECDSA signature' }
       }
 
       // Save the signature
       proposal.signatures.push({
         txhash,
-        outidx,
+        outidx: Number(outidx),
         pubkey,
         signature
       })
@@ -217,37 +300,35 @@ export default defineEventHandler(async (event) => {
       const threshold = (chain === 'regtest') ? 2 : 3 // 3 out of 5 majority for mainnet/testnet
 
       if (proposal.signatures.length >= threshold) {
-        // Aggregate quorum signature
+        // Verify aggregated BLS12-381 signature across all signing quorum members (matching src/llmq.cpp:101-105)
+        try {
+          const parsedPks: Uint8Array[] = []
+          const parsedSigs: Uint8Array[] = []
+          for (const item of proposal.signatures) {
+            const p = verifyAndParseBLSSignedData(item.signature, proposal.txHash, item.pubkey)
+            if (p.valid && p.blsPubKey && p.blsSig) {
+              parsedPks.push(p.blsPubKey)
+              parsedSigs.push(p.blsSig)
+            }
+          }
+          const aggPk = bls12_381.aggregatePublicKeys(parsedPks)
+          const aggSig = bls12_381.aggregateSignatures(parsedSigs)
+          const msgBlockHash = new Uint8Array(Buffer.from(proposal.txHash, 'hex').reverse())
+          if (!bls12_381.verify(aggSig, msgBlockHash, aggPk, { DST: BLS_DST })) {
+            return { success: false, error: 'Aggregated BLS12-381 quorum signature verification failed' }
+          }
+        } catch (aggErr: any) {
+          return { success: false, error: `BLS aggregation failed: ${aggErr.message}` }
+        }
+
+        // Serialize CQuorumSignature and inject into all transaction inputs
         const qsigBuf = serializeQuorumSignature(proposal.txHash, proposal.signatures)
         const qsigPush = Buffer.concat([
           getPushDataPrefix(qsigBuf.length),
           qsigBuf
         ])
 
-        // Parse and rebuild transaction
-        const txBuf = Buffer.from(proposal.rawTxHex, 'hex')
-        
-        // Prefix is 41 bytes (version:4, inputs count:1, outpoint hash:32, outpoint index:4)
-        const prefix = txBuf.subarray(0, 41)
-        
-        // Read scriptSig length
-        const scriptSigLenInfo = readCompactSize(txBuf, 41)
-        const originalScriptSig = txBuf.subarray(41 + scriptSigLenInfo.size, 41 + scriptSigLenInfo.size + scriptSigLenInfo.value)
-        
-        // Suffix starts after originalScriptSig
-        const suffix = txBuf.subarray(41 + scriptSigLenInfo.size + scriptSigLenInfo.value)
-
-        // New scriptSig: original + push(qsig)
-        const newScriptSig = Buffer.concat([originalScriptSig, qsigPush])
-
-        // Final serialized transaction
-        const finalTxBuf = Buffer.concat([
-          prefix,
-          writeCompactSize(newScriptSig.length),
-          newScriptSig,
-          suffix
-        ])
-
+        const finalTxBuf = injectQuorumSigIntoRawTx(proposal.rawTxHex, qsigPush)
         const finalTxHex = finalTxBuf.toString('hex')
 
         try {

@@ -104,8 +104,48 @@ async function getAdamSeed(height: number): Promise<Buffer> {
   return currentSeed
 }
 
+function maskIpAddress(ip: string | undefined): string {
+  if (!ip) return 'On-Chain MN'
+  if (ip === 'On-Chain MN' || ip.startsWith('ADAM-Miner')) return ip
+  const parts = ip.split(':')
+  const ipPart = parts[0] || ''
+  const portPart = parts[1] ? `:${parts[1]}` : ''
+
+  if (ipPart.includes('.')) {
+    const octets = ipPart.split('.')
+    if (octets.length === 4) {
+      return `${octets[0]}.xxx.xxx.${octets[3]}${portPart}`
+    }
+    return `xxx.xxx.xxx.xxx${portPart}`
+  }
+  return `[xxxx:xxxx:xxxx::xxxx]${portPart}`
+}
+
 export default defineEventHandler(async (event) => {
   try {
+    // Prefer consensus-direct getactivequorum RPC from kristatechd (SEC-12 compliant)
+    try {
+      const activeQuorum = await callRpc('getactivequorum')
+      if (activeQuorum && Array.isArray(activeQuorum.members)) {
+        const maskedMembers = activeQuorum.members.map((mn: any) => ({
+          ...mn,
+          ip: maskIpAddress(mn.ip)
+        }))
+        return {
+          success: true,
+          chain: activeQuorum.chain,
+          currentHeight: activeQuorum.currentHeight,
+          dkgHeight: activeQuorum.dkgHeight,
+          seedHeight: activeQuorum.seedHeight,
+          seed: activeQuorum.seed,
+          threshold: activeQuorum.threshold || ((maskedMembers.length < 5) ? 2 : 3),
+          members: maskedMembers
+        }
+      }
+    } catch {
+      // Fallback to manual RPC composition if connected to an older daemon without getactivequorum
+    }
+
     const blockChainInfo = await callRpc('getblockchaininfo')
     const currentHeight = blockChainInfo.blocks
     const chain = blockChainInfo.chain
@@ -137,9 +177,29 @@ export default defineEventHandler(async (event) => {
 
     // Get all enabled/active masternodes
     const allMns = await callRpc('listmasternodes')
-    const enabledMns = allMns.filter((mn: any) => 
+    let enabledMns = (Array.isArray(allMns) ? allMns : []).filter((mn: any) => 
       mn.status === 'ENABLED' || mn.status === 'ACTIVE'
     )
+
+    // SEC-12 fallback: when < 5 active masternodes exist, ElectQuorumMembers falls back to GetAdamMinerPool(nHeight - 1)
+    if (enabledMns.length < 5) {
+      const adamMiners = await callRpc('getadamminers', [Math.max(0, dkgHeight - 1)]).catch(() => [])
+      const pool: string[] = Array.isArray(adamMiners?.pool) ? adamMiners.pool : (Array.isArray(adamMiners) ? adamMiners : [])
+      if (pool.length > 0) {
+        enabledMns = pool.map((pubkeyHex: string, idx: number) => {
+          const pubkeyBytes = Buffer.from(pubkeyHex, 'hex')
+          const pseudoTxHash = doubleSha256(pubkeyBytes).reverse().toString('hex')
+          return {
+            rank: idx + 1,
+            txhash: pseudoTxHash,
+            outidx: idx,
+            pubkey: pubkeyHex,
+            status: 'ENABLED',
+            ip: `ADAM-Miner #${idx + 1}`
+          }
+        })
+      }
+    }
 
     // Compute score for each masternode
     const scoredMns = enabledMns.map((mn: any) => {
@@ -163,27 +223,10 @@ export default defineEventHandler(async (event) => {
     const selectedMns = scoredMns.slice(0, 5).map((item: any) => item.mn)
 
     // Mask their IP addresses to prevent DDoS/DoS harvesting
-    const quorumMembers = selectedMns.map((mn: any) => {
-      const mnCopy = { ...mn }
-      if (mnCopy.ip) {
-        const parts = mnCopy.ip.split(':')
-        const ipPart = parts[0]
-        const portPart = parts[1] ? `:${parts[1]}` : ''
-        
-        if (ipPart.includes('.')) {
-          const octets = ipPart.split('.')
-          if (octets.length === 4) {
-            mnCopy.ip = `${octets[0]}.xxx.xxx.${octets[3]}${portPart}`
-          } else {
-            mnCopy.ip = `xxx.xxx.xxx.xxx${portPart}`
-          }
-        } else {
-          // IPv6 or hostname
-          mnCopy.ip = `[xxxx:xxxx:xxxx::xxxx]${portPart}`
-        }
-      }
-      return mnCopy
-    })
+    const quorumMembers = selectedMns.map((mn: any) => ({
+      ...mn,
+      ip: maskIpAddress(mn.ip)
+    }))
 
     return {
       success: true,
@@ -192,6 +235,7 @@ export default defineEventHandler(async (event) => {
       dkgHeight,
       seedHeight,
       seed: seedHex,
+      threshold: (quorumMembers.length < 5) ? 2 : 3,
       members: quorumMembers
     }
   } catch (error: any) {

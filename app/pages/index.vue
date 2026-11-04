@@ -235,8 +235,11 @@
 
 <script setup>
 import elliptic from 'elliptic'
+import { bls12_381 } from '@noble/curves/bls12-381'
+import { sha256 } from '@noble/hashes/sha256'
 
 const ec = new elliptic.ec('secp256k1')
+const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
 const toast = useToast()
 
 const networkState = useState('network', () => 'main')
@@ -343,6 +346,39 @@ function getRawPrivateKeyFromWIF(wifString) {
   return hex
 }
 
+function hexToBytes(hex) {
+  const clean = hex.trim()
+  const out = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i * 2, 2), 16)
+  }
+  return out
+}
+
+function bytesToHex(bytes) {
+  let hex = ''
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0')
+  }
+  return hex
+}
+
+function writeCompactSizeBytes(size) {
+  if (size < 253) {
+    return new Uint8Array([size])
+  } else if (size <= 0xffff) {
+    return new Uint8Array([253, size & 0xff, (size >> 8) & 0xff])
+  } else {
+    return new Uint8Array([
+      254,
+      size & 0xff,
+      (size >> 8) & 0xff,
+      (size >> 16) & 0xff,
+      (size >> 24) & 0xff
+    ])
+  }
+}
+
 async function signProposal(proposal) {
   if (signForm.value.selectedMnIndex === '' || !signForm.value.wifKey) {
     toast.add({
@@ -374,11 +410,35 @@ async function signProposal(proposal) {
       throw new Error('Girdiğiniz özel anahtar seçtiğiniz masternode\'un public key\'i ile eşleşmiyor!')
     }
 
-    // 3. Sign the proposal's txHash
-    const signature = key.sign(proposal.txHash)
-    const derSigHex = signature.toDER('hex')
+    // 3. Build hybrid CBLSSignedData (blsPubKey[48B] + blsSig[96B] + compactSize + ecdsaSig[DER])
+    // matching CQuorumSignature::Verify in src/llmq.cpp:43-108
+    const privKeyBytes = hexToBytes(privKeyHex)
+    const msgBlockHash = hexToBytes(proposal.txHash).reverse() // 32-byte little-endian internal uint256
 
-    // 4. Send signature to backend
+    const seedInput = new Uint8Array(privKeyBytes.length + msgBlockHash.length)
+    seedInput.set(privKeyBytes, 0)
+    seedInput.set(msgBlockHash, privKeyBytes.length)
+    const blsPrivKey = sha256(sha256(seedInput))
+    blsPrivKey[0] &= 0x3f // Ensure scalar < BLS12-381 curve order r
+    if (blsPrivKey.every((b) => b === 0)) blsPrivKey[31] = 1
+
+    const blsPubKey = bls12_381.getPublicKey(blsPrivKey) // 48 bytes
+    const blsSig = bls12_381.sign(msgBlockHash, blsPrivKey, { DST: BLS_DST }) // 96 bytes
+
+    // Sign Hash(blsPubKey) (double-SHA256) with Masternode secp256k1 key
+    const hashPubKey = sha256(sha256(blsPubKey))
+    const ecdsaSig = key.sign(Array.from(hashPubKey), { canonical: true })
+    const ecdsaDerBytes = new Uint8Array(ecdsaSig.toDER())
+    const ecdsaCompactLen = writeCompactSizeBytes(ecdsaDerBytes.length)
+
+    const signedDataBytes = new Uint8Array(48 + 96 + ecdsaCompactLen.length + ecdsaDerBytes.length)
+    signedDataBytes.set(blsPubKey, 0)
+    signedDataBytes.set(blsSig, 48)
+    signedDataBytes.set(ecdsaCompactLen, 144)
+    signedDataBytes.set(ecdsaDerBytes, 144 + ecdsaCompactLen.length)
+    const signedDataHex = bytesToHex(signedDataBytes)
+
+    // 4. Send CBLSSignedData signature to backend
     const response = await $fetch('/api/proposals', {
       method: 'POST',
       body: {
@@ -387,7 +447,7 @@ async function signProposal(proposal) {
         txhash: selectedMn.txhash,
         outidx: selectedMn.outidx,
         pubkey: selectedMn.pubkey,
-        signature: derSigHex
+        signature: signedDataHex
       }
     })
 

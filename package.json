@@ -10,6 +10,7 @@
     "postinstall": "nuxt prepare"
   },
   "dependencies": {
+    "@noble/curves": "^1.8.1",
     "@nuxt/ui": "^4.10.0",
     "elliptic": "^6.6.1",
     "nuxt": "^4.4.8",

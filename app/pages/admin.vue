@@ -88,7 +88,7 @@
 </template>
 
 <script setup>
-import crypto from 'crypto'
+import { sha256 } from '@noble/hashes/sha256'
 
 const router = useRouter()
 const toast = useToast()
@@ -103,11 +103,14 @@ const loading = ref(false)
 
 // Helper to double-sha256 in hex format (little-endian representation of hash)
 function calculateTxHash(rawTxHex) {
-  const buf = Buffer.from(rawTxHex.trim(), 'hex')
-  const h1 = crypto.createHash('sha256').update(buf).digest()
-  const h2 = crypto.createHash('sha256').update(h1).digest()
-  // Reverse to get big-endian hex for TxID
-  return Buffer.from(h2).reverse().toString('hex')
+  const clean = rawTxHex.trim()
+  const rawBytes = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < rawBytes.length; i++) {
+    rawBytes[i] = parseInt(clean.substr(i * 2, 2), 16)
+  }
+  const h2 = sha256(sha256(rawBytes))
+  const rev = Array.from(h2).reverse()
+  return rev.map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 async function createProposal() {
