@@ -232,6 +232,89 @@ function verifyAndParseBLSSignedData(
   }
 }
 
+// Helper to compute RIPEMD160(SHA256(buf)) (Bitcoin Hash160)
+function hash160(buf: Buffer): Buffer {
+  const sha = crypto.createHash('sha256').update(buf).digest()
+  return crypto.createHash('ripemd160').update(sha).digest()
+}
+
+// Helper to compute legacy Bitcoin/KristaTech SIGHASH_ALL (0x01) digest for input `inputIndex`
+function computeSighashAll(rawTxHex: string, inputIndex: number, scriptCode: Buffer): Buffer {
+  const txBuf = Buffer.from(rawTxHex, 'hex')
+  let offset = 0
+
+  const version = txBuf.subarray(offset, offset + 4)
+  offset += 4
+
+  const vinCountInfo = readCompactSize(txBuf, offset)
+  const vinCountBuf = txBuf.subarray(offset, offset + vinCountInfo.size)
+  offset += vinCountInfo.size
+
+  const parts: Buffer[] = [version, vinCountBuf]
+
+  for (let i = 0; i < vinCountInfo.value; i++) {
+    const prevout = txBuf.subarray(offset, offset + 36)
+    offset += 36
+
+    const scriptSigLenInfo = readCompactSize(txBuf, offset)
+    offset += scriptSigLenInfo.size + scriptSigLenInfo.value
+
+    const nSequence = txBuf.subarray(offset, offset + 4)
+    offset += 4
+
+    if (i === inputIndex) {
+      parts.push(prevout, writeCompactSize(scriptCode.length), scriptCode, nSequence)
+    } else {
+      parts.push(prevout, Buffer.from([0x00]), nSequence)
+    }
+  }
+
+  // Remaining bytes (vout + nLockTime) + 4-byte little-endian SIGHASH_ALL (0x01000000)
+  parts.push(txBuf.subarray(offset), Buffer.from([0x01, 0x00, 0x00, 0x00]))
+  return doubleSha256(Buffer.concat(parts))
+}
+
+// Helper to cryptographically verify input's Spork ECDSA signature matching CheckInputs (src/main.cpp:1963-1978)
+function verifySporkInputSignature(
+  rawTxHex: string,
+  inputIndex: number,
+  sigPush: Buffer,
+  pubKeyPush: Buffer,
+  sporkPubKeyHex: string
+): { valid: boolean; error?: string } {
+  try {
+    // CheckInputs constructs scriptPubKey = GetScriptForDestination(sporkKey.GetID()), so pushed pubkey must match sporkPubKey bytes
+    if (pubKeyPush.toString('hex').toLowerCase() !== sporkPubKeyHex.toLowerCase()) {
+      return { valid: false, error: 'Input scriptSig public key does not match consensus Spork public key' }
+    }
+    if (sigPush.length < 9 || sigPush.length > 73) {
+      return { valid: false, error: `Invalid Spork ECDSA signature length (${sigPush.length})` }
+    }
+    const nHashType = sigPush[sigPush.length - 1]
+    if (nHashType !== 0x01) {
+      return { valid: false, error: `Invalid Spork signature hash type (0x${nHashType.toString(16)}); SIGHASH_ALL (0x01) is required` }
+    }
+    const derSig = sigPush.subarray(0, sigPush.length - 1)
+
+    const sporkPubKeyBuf = Buffer.from(sporkPubKeyHex, 'hex')
+    const sporkScriptCode = Buffer.concat([
+      Buffer.from('76a914', 'hex'),
+      hash160(sporkPubKeyBuf),
+      Buffer.from('88ac', 'hex')
+    ])
+
+    const key = ec.keyFromPublic(sporkPubKeyHex, 'hex')
+    const sighashSpork = computeSighashAll(rawTxHex, inputIndex, sporkScriptCode)
+    if (key.verify(sighashSpork, derSig)) {
+      return { valid: true }
+    }
+
+    return { valid: false, error: 'Cryptographic verification of Spork ECDSA signature failed' }
+  } catch (err: any) {
+    return { valid: false, error: `Spork signature verification error: ${err.message}` }
+  }
+}
+
 // Helper to append quorum signature push to all inputs of a serialized transaction
 function injectQuorumSigIntoRawTx(rawTxHex: string, qsigPush: Buffer): Buffer {
   const txBuf = Buffer.from(rawTxHex, 'hex')
@@ -345,7 +428,14 @@ export default defineEventHandler(async (event) => {
         return { success: false, error: 'Proposal with this txHash already exists' }
       }
 
-      for (const vin of decodedTx.vin) {
+      const cleanTargetAddress = String(targetAddress).trim()
+      const requestedAmount = Number(amount)
+      if (!cleanTargetAddress || !Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+        return { success: false, error: 'Invalid targetAddress or amount' }
+      }
+
+      for (let i = 0; i < decodedTx.vin.length; i++) {
+        const vin = decodedTx.vin[i]
         if (!vin.txid || vin.vout === undefined) {
           return { success: false, error: 'Invalid coinbase or missing input outpoint in proposal transaction' }
         }
@@ -354,19 +444,56 @@ export default defineEventHandler(async (event) => {
         if (!txOut) {
           return { success: false, error: `Input UTXO ${vin.txid}:${vin.vout} is already spent or does not exist` }
         }
-        const outAddresses: string[] = txOut.scriptPubKey?.addresses || []
+        const outAddresses: string[] = txOut.scriptPubKey?.addresses || (txOut.scriptPubKey?.address ? [txOut.scriptPubKey.address] : [])
         if (!outAddresses.includes(quorumInfo.developerFundAddress)) {
           return { success: false, error: `Input UTXO ${vin.txid}:${vin.vout} does not belong to Developer Fund (${quorumInfo.developerFundAddress})` }
         }
 
-        // Check scriptSig contains <sporkSig> <sporkPubKey>
+        // Check scriptSig contains <sporkSig> <sporkPubKey> and cryptographically verify Spork ECDSA signature
         const pushes = extractScriptSigPushes(vin.scriptSig?.hex || '')
         if (pushes.length < 2) {
           return { success: false, error: 'Input scriptSig must be pre-signed with Spork signature and Spork public key' }
         }
-        const pushedPubKeyHex = pushes[1].toString('hex')
-        if (!pubkeysMatch(pushedPubKeyHex, quorumInfo.sporkPubKey)) {
-          return { success: false, error: 'Input scriptSig public key does not match consensus Spork public key' }
+        const sporkVerify = verifySporkInputSignature(
+          cleanRawHex,
+          i,
+          pushes[0],
+          pushes[1],
+          quorumInfo.sporkPubKey
+        )
+        if (!sporkVerify.valid) {
+          return { success: false, error: `Input #${i} invalid Spork signature: ${sporkVerify.error}` }
+        }
+      }
+
+      // 3. Verify decodedTx.vout matches targetAddress and amount (only targetAddress and Developer Fund change allowed)
+      let targetAmountSats = 0
+      for (let outIdx = 0; outIdx < decodedTx.vout.length; outIdx++) {
+        const vout = decodedTx.vout[outIdx]
+        const voutAddresses: string[] = vout.scriptPubKey?.addresses || (vout.scriptPubKey?.address ? [vout.scriptPubKey.address] : [])
+        if (voutAddresses.length !== 1) {
+          return { success: false, error: `Output #${outIdx} must have a single standard destination address` }
+        }
+        const outAddr = voutAddresses[0]
+        const outSats = Math.round(Number(vout.value) * 1e8)
+        if (outSats <= 0) {
+          return { success: false, error: `Output #${outIdx} has non-positive value` }
+        }
+        if (outAddr === cleanTargetAddress) {
+          targetAmountSats += outSats
+        } else if (outAddr !== quorumInfo.developerFundAddress) {
+          return {
+            success: false,
+            error: `Output #${outIdx} pays unauthorized address ${outAddr}; only targetAddress (${cleanTargetAddress}) and Developer Fund change (${quorumInfo.developerFundAddress}) are allowed`
+          }
+        }
+      }
+
+      const requestedAmountSats = Math.round(requestedAmount * 1e8)
+      if (targetAmountSats <= 0 || targetAmountSats !== requestedAmountSats) {
+        return {
+          success: false,
+          error: `Proposal amount (${requestedAmount} KRISTA) does not match transaction output total to ${cleanTargetAddress} (${targetAmountSats / 1e8} KRISTA)`
         }
       }
 
@@ -374,8 +501,8 @@ export default defineEventHandler(async (event) => {
         id: crypto.randomUUID(),
         rawTxHex: cleanRawHex,
         txHash: cleanTxHash,
-        targetAddress: String(targetAddress).trim(),
-        amount: Number(amount),
+        targetAddress: cleanTargetAddress,
+        amount: targetAmountSats / 1e8,
         signatures: [],
         status: 'pending',
         createdAt: new Date().toISOString()
