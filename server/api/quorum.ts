@@ -91,12 +91,12 @@ async function getAdamSeed(height: number): Promise<Buffer> {
     const vrfProofHex = block.vAdamVRFProof || ''
     const vrfProofBytes = Buffer.from(vrfProofHex, 'hex')
 
-    // Serialize: currentSeed (32 bytes) + compact size + vrfProofBytes
-    const dataToHash = Buffer.concat([
-      currentSeed,
-      writeCompactSize(vrfProofBytes.length),
-      vrfProofBytes
-    ])
+    // Match ComputeNextAdamSeed in src/adam.cpp:
+    // If vAdamVRFProof contains a valid CBLSSignedData (>= 144 bytes: 48B blsPubKey + 96B blsSig),
+    // hash currentSeed + raw 144 bytes without CompactSize or trailing ECDSA auth signature.
+    const dataToHash = vrfProofBytes.length >= 144
+      ? Buffer.concat([currentSeed, vrfProofBytes.subarray(0, 144)])
+      : Buffer.concat([currentSeed, writeCompactSize(vrfProofBytes.length), vrfProofBytes])
     currentSeed = doubleSha256(dataToHash)
     seedCache.set(h, currentSeed)
   }
