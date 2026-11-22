@@ -1,646 +1,510 @@
-import fs from 'fs'
-import path from 'path'
-import crypto from 'crypto'
-import elliptic from 'elliptic'
-import { bls12_381 } from '@noble/curves/bls12-381'
+import crypto from 'node:crypto'
+import { defineEventHandler, readBody, setResponseStatus } from 'h3'
+import {
+  acquireProposalLock,
+  callKristaRpc,
+  checkApiRateLimit,
+  readProposalsAtomically,
+  resolveClientIp,
+  sanitizeRpcErrorMessage,
+  writeProposalsAtomically
+} from '../utils/security'
+import {
+  CHAIN_DEFAULTS,
+  blsPubKeysMatch,
+  bytesToHex,
+  calculateTxHash,
+  concatBytes,
+  extractScriptSigPushesBytes,
+  getPushDataPrefixBytes,
+  getQuorumMajorityThreshold,
+  injectQuorumSigIntoRawTxBytes,
+  isValidKristaAddress,
+  normalizeTaprootAddress,
+  pubkeysMatch,
+  serializeQuorumSignatureBytes,
+  verifyAggregatedBLSSignatures,
+  verifyAndParseBLSSignedData,
+  verifySporkInputSignature
+} from '../utils/treasuryCrypto'
 
-const ec = new elliptic.ec('secp256k1')
-const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
-
-const CHAIN_DEFAULTS: Record<string, { devFundAddr: string; sporkPubKey: string }> = {
-  main: {
-    devFundAddr: 'KTeRC2Kj8hXcuzRohxPp2LtYFRJm2BceRoP',
-    sporkPubKey: '024897ee03b6f8133aa5fc926c8f9fd83b1454a817fda9fc907de18866eba0030a'
-  },
-  test: {
-    devFundAddr: 'ktEooARF3HdV8w59LUc5jaHrS7GBL7974Uy',
-    sporkPubKey: '03b4394f924c8bdbea7379fbcde9bf1b5a32d0f04631312b18c4ba3889a89b6a0d'
-  },
-  regtest: {
-    devFundAddr: 'kt5KNitasi4bEHbQQCrpy6445nJD7uSVNux',
-    sporkPubKey: '043969b1b0e6f327de37f297a015d37e2235eaaeeb3933deecd8162c075cee0207b13537618bde640879606001a8136091c62ec272dd0133424a178704e6e75bb7'
-  }
-}
-
-function pubkeysMatch(pkHexA: string, pkHexB: string): boolean {
-  try {
-    if (pkHexA.toLowerCase() === pkHexB.toLowerCase()) return true
-    const keyA = ec.keyFromPublic(pkHexA, 'hex')
-    const keyB = ec.keyFromPublic(pkHexB, 'hex')
-    return keyA.getPublic(true, 'hex').toLowerCase() === keyB.getPublic(true, 'hex').toLowerCase()
-  } catch {
-    return false
-  }
-}
-
-function extractScriptSigPushes(scriptSigHex: string): Buffer[] {
-  const buf = Buffer.from(scriptSigHex, 'hex')
-  const pushes: Buffer[] = []
-  let i = 0
-  while (i < buf.length) {
-    const op = buf.readUInt8(i)
-    i += 1
-    let len = 0
-    if (op >= 1 && op <= 75) {
-      len = op
-    } else if (op === 76) {
-      if (i + 1 > buf.length) break
-      len = buf.readUInt8(i)
-      i += 1
-    } else if (op === 77) {
-      if (i + 2 > buf.length) break
-      len = buf.readUInt16LE(i)
-      i += 2
-    } else if (op === 78) {
-      if (i + 4 > buf.length) break
-      len = buf.readUInt32LE(i)
-      i += 4
-    } else {
-      break
-    }
-    if (i + len > buf.length) break
-    pushes.push(buf.subarray(i, i + len))
-    i += len
-  }
-  return pushes
-}
+const callRpc = callKristaRpc
 
 async function fetchActiveQuorumForSpend() {
-  const blockChainInfo = await callRpc('getblockchaininfo')
+  const [blockChainInfo, rawMns] = await Promise.all([
+    callRpc('getblockchaininfo'),
+    callRpc('listmasternodes').catch(() => [])
+  ])
   const currentHeight = Number(blockChainInfo.blocks)
   const targetHeight = currentHeight + 1
   const chain = String(blockChainInfo.chain || 'main')
-  const defaults = CHAIN_DEFAULTS[chain] || CHAIN_DEFAULTS.main
+  const defaults = CHAIN_DEFAULTS[chain] || CHAIN_DEFAULTS.main!
 
-  const activeQuorum = await callRpc('getactivequorum', [targetHeight])
+  const enabledMns = (Array.isArray(rawMns) ? rawMns : []).filter(
+    (mn: any) => mn.status === 'ENABLED' || mn.status === 'ACTIVE'
+  )
+  const liveMnMap = new Map<string, any>()
+  for (const mn of enabledMns) {
+    liveMnMap.set(`${String(mn.txhash || '').toLowerCase()}:${Number(mn.outidx)}`, mn)
+  }
+
+  const activeQuorum = await callRpc('getactivequorum', [targetHeight]).catch(() => null)
+  const rawMembers = Array.isArray(activeQuorum?.members) ? activeQuorum.members : []
+  const members: any[] = []
+  for (const m of rawMembers) {
+    const liveMn = liveMnMap.get(`${String(m.txhash || '').toLowerCase()}:${Number(m.outidx)}`)
+    if (!liveMn) continue
+    const livePk = String(liveMn.pubkey || '').trim()
+    const memberPk = String(m.pubkey || '').trim()
+    const explicitOpPk = String(m.operatorPubKey || m.blsPubKey || '').trim()
+    const operatorPubKey =
+      (/^[0-9a-fA-F]{96}$/.test(explicitOpPk) ? explicitOpPk : '') ||
+      (/^[0-9a-fA-F]{96}$/.test(livePk) ? livePk : '') ||
+      (/^[0-9a-fA-F]{96}$/.test(memberPk) ? memberPk : '')
+    const pubkey =
+      (/^[0-9a-fA-F]{66,130}$/.test(memberPk) && memberPk.length !== 96 ? memberPk : '') ||
+      livePk ||
+      memberPk
+    members.push({
+      ...liveMn,
+      ...m,
+      pubkey,
+      operatorPubKey: operatorPubKey || undefined
+    })
+  }
+
   return {
     chain,
     currentHeight,
     targetHeight,
-    threshold: Number(activeQuorum?.threshold || (chain === 'regtest' ? 2 : 3)),
+    treasuryGovernanceStartHeight: Number(
+      activeQuorum?.treasuryGovernanceStartHeight ?? defaults.treasuryGovernanceStartHeight
+    ),
+    threshold: Number(
+      activeQuorum?.threshold || getQuorumMajorityThreshold(members.length || 5)
+    ),
     developerFundAddress: String(activeQuorum?.developerFundAddress || defaults.devFundAddr),
     sporkPubKey: String(activeQuorum?.sporkPubKey || defaults.sporkPubKey),
-    members: Array.isArray(activeQuorum?.members) ? activeQuorum.members : []
+    members
   }
-}
-
-function doubleSha256(buf: Buffer): Buffer {
-  const h1 = crypto.createHash('sha256').update(buf).digest()
-  return crypto.createHash('sha256').update(h1).digest()
-}
-
-const RPC_URL = process.env.NUXT_RPC_URL || 'http://127.0.0.1:27998'
-const RPC_AUTH = Buffer.from(`${process.env.NUXT_RPC_USER || 'kristarpc'}:${process.env.NUXT_RPC_PASSWORD || 'kristapassword'}`).toString('base64')
-const DATA_FILE = path.join('/home/bedri/Coin-Projects/KristaTech-Treasury-Portal', 'proposals.json')
-
-async function callRpc(method: string, params: any[] = []) {
-  const response = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${RPC_AUTH}`
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 'nuxt-api',
-      method,
-      params
-    })
-  })
-  if (!response.ok) {
-    throw new Error(`RPC call ${method} failed: ${response.statusText}`)
-  }
-  const json: any = await response.json()
-  return json.result
-}
-
-// Read/write proposals
-function readProposals() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return []
-  }
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'))
-  } catch {
-    return []
-  }
-}
-
-function writeProposals(data: any) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8')
-}
-
-// Helpers for compact size
-function writeCompactSize(size: number): Buffer {
-  if (size < 253) {
-    return Buffer.from([size])
-  } else if (size <= 0xffff) {
-    const buf = Buffer.alloc(3)
-    buf.writeUInt8(253, 0)
-    buf.writeUInt16LE(size, 1)
-    return buf
-  } else if (size <= 0xffffffff) {
-    const buf = Buffer.alloc(5)
-    buf.writeUInt8(254, 0)
-    buf.writeUInt32LE(size, 1)
-    return buf
-  } else {
-    const buf = Buffer.alloc(9)
-    buf.writeUInt8(255, 0)
-    buf.writeBigUInt64LE(BigInt(size), 1)
-    return buf
-  }
-}
-
-// Helper to parse compact size from buffer
-function readCompactSize(buf: Buffer, offset: number): { value: number; size: number } {
-  const first = buf.readUInt8(offset)
-  if (first < 253) {
-    return { value: first, size: 1 }
-  } else if (first === 253) {
-    return { value: buf.readUInt16LE(offset + 1), size: 3 }
-  } else if (first === 254) {
-    return { value: buf.readUInt32LE(offset + 1), size: 5 }
-  } else {
-    return { value: Number(buf.readBigUInt64LE(offset + 1)), size: 9 }
-  }
-}
-
-// Helper to push data in Bitcoin Script
-function getPushDataPrefix(length: number): Buffer {
-  if (length < 76) {
-    return Buffer.from([length])
-  } else if (length <= 255) {
-    return Buffer.from([76, length])
-  } else if (length <= 65535) {
-    const buf = Buffer.alloc(3)
-    buf.writeUInt8(77, 0)
-    buf.writeUInt16LE(length, 1)
-    return buf
-  } else {
-    const buf = Buffer.alloc(5)
-    buf.writeUInt8(78, 0)
-    buf.writeUInt32LE(length, 1)
-    return buf
-  }
-}
-
-// Helper to deserialize and verify CBLSSignedData (blsPubKey[48] + blsSig[96] + compactSize + ecdsaSig)
-// matching CQuorumSignature::Verify in src/llmq.cpp:43-108
-function verifyAndParseBLSSignedData(
-  sigHex: string,
-  txHashHex: string,
-  memberPubkeyHex: string
-): { valid: boolean; error?: string; blsPubKey?: Uint8Array; blsSig?: Uint8Array } {
-  try {
-    const sigBuf = Buffer.from(sigHex, 'hex')
-    // Minimum size: 48 (G1 pubkey) + 96 (G2 sig) + 1 (compactSize) + 64 (ECDSA DER)
-    if (sigBuf.length < 209 || sigBuf.length > 512) {
-      return { valid: false, error: `Invalid CBLSSignedData byte length (${sigBuf.length}); expected 48B blsPubKey + 96B blsSig + DER ecdsaSig` }
-    }
-
-    const blsPubKey = sigBuf.subarray(0, 48)
-    const blsSig = sigBuf.subarray(48, 144)
-    const ecdsaLenInfo = readCompactSize(sigBuf, 144)
-    const expectedTotal = 144 + ecdsaLenInfo.size + ecdsaLenInfo.value
-    if (expectedTotal !== sigBuf.length || ecdsaLenInfo.value === 0) {
-      return { valid: false, error: 'Malformed CBLSSignedData compactSize for ecdsaSig' }
-    }
-    const ecdsaSig = sigBuf.subarray(144 + ecdsaLenInfo.size, expectedTotal)
-
-    // 1. Verify ECDSA signature by memberPubKey over Hash(blsPubKey) (double-SHA256)
-    const hashPubKey = doubleSha256(blsPubKey)
-    const key = ec.keyFromPublic(memberPubkeyHex, 'hex')
-    if (!key.verify(hashPubKey, ecdsaSig)) {
-      return { valid: false, error: 'Invalid Masternode ECDSA authorization signature over Hash(blsPubKey)' }
-    }
-
-    // 2. Verify BLS12-381 signature over blockHash.begin() (32-byte little-endian internal uint256)
-    const msgBlockHash = new Uint8Array(Buffer.from(txHashHex, 'hex').reverse())
-    const blsOk = bls12_381.verify(new Uint8Array(blsSig), msgBlockHash, new Uint8Array(blsPubKey), { DST: BLS_DST })
-    if (!blsOk) {
-      return { valid: false, error: 'Invalid BLS12-381 signature over proposal txHash' }
-    }
-
-    return {
-      valid: true,
-      blsPubKey: new Uint8Array(blsPubKey),
-      blsSig: new Uint8Array(blsSig)
-    }
-  } catch (err: any) {
-    return { valid: false, error: `CBLSSignedData verification failed: ${err.message}` }
-  }
-}
-
-// Helper to compute RIPEMD160(SHA256(buf)) (Bitcoin Hash160)
-function hash160(buf: Buffer): Buffer {
-  const sha = crypto.createHash('sha256').update(buf).digest()
-  return crypto.createHash('ripemd160').update(sha).digest()
-}
-
-// Helper to compute legacy Bitcoin/KristaTech SIGHASH_ALL (0x01) digest for input `inputIndex`
-function computeSighashAll(rawTxHex: string, inputIndex: number, scriptCode: Buffer): Buffer {
-  const txBuf = Buffer.from(rawTxHex, 'hex')
-  let offset = 0
-
-  const version = txBuf.subarray(offset, offset + 4)
-  offset += 4
-
-  const vinCountInfo = readCompactSize(txBuf, offset)
-  const vinCountBuf = txBuf.subarray(offset, offset + vinCountInfo.size)
-  offset += vinCountInfo.size
-
-  const parts: Buffer[] = [version, vinCountBuf]
-
-  for (let i = 0; i < vinCountInfo.value; i++) {
-    const prevout = txBuf.subarray(offset, offset + 36)
-    offset += 36
-
-    const scriptSigLenInfo = readCompactSize(txBuf, offset)
-    offset += scriptSigLenInfo.size + scriptSigLenInfo.value
-
-    const nSequence = txBuf.subarray(offset, offset + 4)
-    offset += 4
-
-    if (i === inputIndex) {
-      parts.push(prevout, writeCompactSize(scriptCode.length), scriptCode, nSequence)
-    } else {
-      parts.push(prevout, Buffer.from([0x00]), nSequence)
-    }
-  }
-
-  // Remaining bytes (vout + nLockTime) + 4-byte little-endian SIGHASH_ALL (0x01000000)
-  parts.push(txBuf.subarray(offset), Buffer.from([0x01, 0x00, 0x00, 0x00]))
-  return doubleSha256(Buffer.concat(parts))
-}
-
-// Helper to cryptographically verify input's Spork ECDSA signature matching CheckInputs (src/main.cpp:1963-1978)
-function verifySporkInputSignature(
-  rawTxHex: string,
-  inputIndex: number,
-  sigPush: Buffer,
-  pubKeyPush: Buffer,
-  sporkPubKeyHex: string
-): { valid: boolean; error?: string } {
-  try {
-    // CheckInputs constructs scriptPubKey = GetScriptForDestination(sporkKey.GetID()), so pushed pubkey must match sporkPubKey bytes
-    if (pubKeyPush.toString('hex').toLowerCase() !== sporkPubKeyHex.toLowerCase()) {
-      return { valid: false, error: 'Input scriptSig public key does not match consensus Spork public key' }
-    }
-    if (sigPush.length < 9 || sigPush.length > 73) {
-      return { valid: false, error: `Invalid Spork ECDSA signature length (${sigPush.length})` }
-    }
-    const nHashType = sigPush[sigPush.length - 1]
-    if (nHashType !== 0x01) {
-      return { valid: false, error: `Invalid Spork signature hash type (0x${nHashType.toString(16)}); SIGHASH_ALL (0x01) is required` }
-    }
-    const derSig = sigPush.subarray(0, sigPush.length - 1)
-
-    const sporkPubKeyBuf = Buffer.from(sporkPubKeyHex, 'hex')
-    const sporkScriptCode = Buffer.concat([
-      Buffer.from('76a914', 'hex'),
-      hash160(sporkPubKeyBuf),
-      Buffer.from('88ac', 'hex')
-    ])
-
-    const key = ec.keyFromPublic(sporkPubKeyHex, 'hex')
-    const sighashSpork = computeSighashAll(rawTxHex, inputIndex, sporkScriptCode)
-    if (key.verify(sighashSpork, derSig)) {
-      return { valid: true }
-    }
-
-    return { valid: false, error: 'Cryptographic verification of Spork ECDSA signature failed' }
-  } catch (err: any) {
-    return { valid: false, error: `Spork signature verification error: ${err.message}` }
-  }
-}
-
-// Helper to append quorum signature push to all inputs of a serialized transaction
-function injectQuorumSigIntoRawTx(rawTxHex: string, qsigPush: Buffer): Buffer {
-  const txBuf = Buffer.from(rawTxHex, 'hex')
-  let offset = 0
-
-  // nVersion (4 bytes)
-  const version = txBuf.subarray(offset, offset + 4)
-  offset += 4
-
-  // vin count
-  const vinCountInfo = readCompactSize(txBuf, offset)
-  const vinCountBuf = txBuf.subarray(offset, offset + vinCountInfo.size)
-  offset += vinCountInfo.size
-
-  const parts: Buffer[] = [version, vinCountBuf]
-
-  for (let i = 0; i < vinCountInfo.value; i++) {
-    // prevout (32-byte hash + 4-byte index)
-    const prevout = txBuf.subarray(offset, offset + 36)
-    offset += 36
-
-    const scriptSigLenInfo = readCompactSize(txBuf, offset)
-    offset += scriptSigLenInfo.size
-    const originalScriptSig = txBuf.subarray(offset, offset + scriptSigLenInfo.value)
-    offset += scriptSigLenInfo.value
-
-    const nSequence = txBuf.subarray(offset, offset + 4)
-    offset += 4
-
-    const newScriptSig = Buffer.concat([originalScriptSig, qsigPush])
-    parts.push(prevout, writeCompactSize(newScriptSig.length), newScriptSig, nSequence)
-  }
-
-  // Remaining bytes (vout + nLockTime)
-  parts.push(txBuf.subarray(offset))
-  return Buffer.concat(parts)
-}
-
-// Helper to aggregate CQuorumSignature
-function serializeQuorumSignature(txHashHex: string, sigs: any[]): Buffer {
-  const blockHashBuf = Buffer.from(txHashHex, 'hex').reverse()
-  const parts = [blockHashBuf]
-
-  // signatures vector size
-  parts.push(writeCompactSize(sigs.length))
-
-  for (const item of sigs) {
-    const txhashBuf = Buffer.from(item.txhash, 'hex').reverse()
-    const outidxBuf = Buffer.alloc(4)
-    outidxBuf.writeUInt32LE(item.outidx, 0)
-    const sigBuf = Buffer.from(item.signature, 'hex')
-
-    parts.push(txhashBuf)
-    parts.push(outidxBuf)
-    parts.push(writeCompactSize(sigBuf.length))
-    parts.push(sigBuf)
-  }
-
-  return Buffer.concat(parts)
 }
 
 export default defineEventHandler(async (event) => {
   const method = event.node.req.method
+  const clientIp = resolveClientIp(event)
 
   if (method === 'GET') {
-    return readProposals()
+    const rateCheck = checkApiRateLimit('proposals-get', clientIp, 60, 60_000)
+    if (!rateCheck.allowed) {
+      setResponseStatus(event, 429)
+      return []
+    }
+    return readProposalsAtomically()
   }
 
   if (method === 'POST') {
-    const body = await readBody(event)
-    const { action } = body
+    const body = await readBody(event).catch(() => null)
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return { success: false, error: 'Invalid request body' }
+    }
+
+    const { action } = body as Record<string, any>
 
     if (action === 'create') {
-      const { rawTxHex, txHash, targetAddress, amount } = body
-      if (!rawTxHex || !txHash || !targetAddress || !amount) {
-        return { success: false, error: 'Missing parameters' }
-      }
-      const cleanRawHex = String(rawTxHex).trim()
-      const cleanTxHash = String(txHash).trim().toLowerCase()
-      if (cleanRawHex.length === 0 || cleanRawHex.length % 2 !== 0 || cleanRawHex.length > 200000 || !/^[0-9a-fA-F]+$/.test(cleanRawHex) ||
-          !/^[0-9a-fA-F]{64}$/.test(cleanTxHash)) {
-        return { success: false, error: 'Invalid rawTxHex or txHash format/size' }
-      }
-
-      // 1. Verify txHash matches double-SHA256(rawTxHex)
-      const computedTxHash = doubleSha256(Buffer.from(cleanRawHex, 'hex')).reverse().toString('hex').toLowerCase()
-      if (computedTxHash !== cleanTxHash) {
-        return { success: false, error: 'txHash does not match double-SHA256 digest of rawTxHex' }
-      }
-
-      // 2. Verify rawTxHex is a valid transaction spending an unspent Developer Fund UTXO signed by Spork Key
-      let decodedTx: any
-      let quorumInfo: any
-      try {
-        quorumInfo = await fetchActiveQuorumForSpend()
-        decodedTx = await callRpc('decoderawtransaction', [cleanRawHex])
-      } catch (err: any) {
-        return { success: false, error: `Failed to decode or validate raw transaction: ${err.message}` }
-      }
-
-      if (!decodedTx || !Array.isArray(decodedTx.vin) || decodedTx.vin.length === 0 || !Array.isArray(decodedTx.vout) || decodedTx.vout.length === 0) {
-        return { success: false, error: 'Decoded transaction has no inputs or outputs' }
-      }
-
-      const proposals = readProposals()
-      const pendingProposals = proposals.filter((p: any) => p.status === 'pending')
-      if (pendingProposals.length >= 50) {
-        return { success: false, error: 'Maximum pending proposals limit (50) reached' }
-      }
-      if (proposals.some((p: any) => String(p.txHash).toLowerCase() === cleanTxHash && p.status !== 'failed')) {
-        return { success: false, error: 'Proposal with this txHash already exists' }
-      }
-
-      const cleanTargetAddress = String(targetAddress).trim()
-      const requestedAmount = Number(amount)
-      if (!cleanTargetAddress || !Number.isFinite(requestedAmount) || requestedAmount <= 0) {
-        return { success: false, error: 'Invalid targetAddress or amount' }
-      }
-
-      for (let i = 0; i < decodedTx.vin.length; i++) {
-        const vin = decodedTx.vin[i]
-        if (!vin.txid || vin.vout === undefined) {
-          return { success: false, error: 'Invalid coinbase or missing input outpoint in proposal transaction' }
-        }
-        // Check UTXO is unspent and belongs to Developer Fund Address
-        const txOut = await callRpc('gettxout', [vin.txid, Number(vin.vout), true])
-        if (!txOut) {
-          return { success: false, error: `Input UTXO ${vin.txid}:${vin.vout} is already spent or does not exist` }
-        }
-        const outAddresses: string[] = txOut.scriptPubKey?.addresses || (txOut.scriptPubKey?.address ? [txOut.scriptPubKey.address] : [])
-        if (!outAddresses.includes(quorumInfo.developerFundAddress)) {
-          return { success: false, error: `Input UTXO ${vin.txid}:${vin.vout} does not belong to Developer Fund (${quorumInfo.developerFundAddress})` }
-        }
-
-        // Check scriptSig contains <sporkSig> <sporkPubKey> and cryptographically verify Spork ECDSA signature
-        const pushes = extractScriptSigPushes(vin.scriptSig?.hex || '')
-        if (pushes.length < 2) {
-          return { success: false, error: 'Input scriptSig must be pre-signed with Spork signature and Spork public key' }
-        }
-        const sporkVerify = verifySporkInputSignature(
-          cleanRawHex,
-          i,
-          pushes[0],
-          pushes[1],
-          quorumInfo.sporkPubKey
-        )
-        if (!sporkVerify.valid) {
-          return { success: false, error: `Input #${i} invalid Spork signature: ${sporkVerify.error}` }
-        }
-      }
-
-      // 3. Verify decodedTx.vout matches targetAddress and amount (only targetAddress and Developer Fund change allowed)
-      let targetAmountSats = 0
-      for (let outIdx = 0; outIdx < decodedTx.vout.length; outIdx++) {
-        const vout = decodedTx.vout[outIdx]
-        const voutAddresses: string[] = vout.scriptPubKey?.addresses || (vout.scriptPubKey?.address ? [vout.scriptPubKey.address] : [])
-        if (voutAddresses.length !== 1) {
-          return { success: false, error: `Output #${outIdx} must have a single standard destination address` }
-        }
-        const outAddr = voutAddresses[0]
-        const outSats = Math.round(Number(vout.value) * 1e8)
-        if (outSats <= 0) {
-          return { success: false, error: `Output #${outIdx} has non-positive value` }
-        }
-        if (outAddr === cleanTargetAddress) {
-          targetAmountSats += outSats
-        } else if (outAddr !== quorumInfo.developerFundAddress) {
-          return {
-            success: false,
-            error: `Output #${outIdx} pays unauthorized address ${outAddr}; only targetAddress (${cleanTargetAddress}) and Developer Fund change (${quorumInfo.developerFundAddress}) are allowed`
-          }
-        }
-      }
-
-      const requestedAmountSats = Math.round(requestedAmount * 1e8)
-      if (targetAmountSats <= 0 || targetAmountSats !== requestedAmountSats) {
+      const rateCheck = checkApiRateLimit('proposals-create', clientIp, 15, 60_000)
+      if (!rateCheck.allowed) {
+        setResponseStatus(event, 429)
         return {
           success: false,
-          error: `Proposal amount (${requestedAmount} KRISTA) does not match transaction output total to ${cleanTargetAddress} (${targetAmountSats / 1e8} KRISTA)`
+          error: `Rate limit exceeded. Try again in ${rateCheck.retryAfterSec}s.`
         }
       }
 
-      const newProposal = {
-        id: crypto.randomUUID(),
-        rawTxHex: cleanRawHex,
-        txHash: cleanTxHash,
-        targetAddress: cleanTargetAddress,
-        amount: targetAmountSats / 1e8,
-        signatures: [],
-        status: 'pending',
-        createdAt: new Date().toISOString()
+      const releaseLock = acquireProposalLock('proposals-write')
+      if (!releaseLock) {
+        setResponseStatus(event, 409)
+        return {
+          success: false,
+          error: 'Another proposal operation is currently in progress. Please retry.'
+        }
       }
 
-      proposals.push(newProposal)
-      writeProposals(proposals)
+      try {
+        const { rawTxHex, txHash, targetAddress, amount } = body as Record<string, any>
+        if (!rawTxHex || !txHash || !targetAddress || amount === undefined || amount === null) {
+          return { success: false, error: 'Missing parameters' }
+        }
+        const cleanRawHex = String(rawTxHex).trim()
+        const cleanTxHash = String(txHash).trim().toLowerCase()
+        if (
+          cleanRawHex.length === 0 ||
+          cleanRawHex.length % 2 !== 0 ||
+          cleanRawHex.length > 200000 ||
+          !/^[0-9a-fA-F]+$/.test(cleanRawHex) ||
+          !/^[0-9a-fA-F]{64}$/.test(cleanTxHash)
+        ) {
+          return { success: false, error: 'Invalid rawTxHex or txHash format/size' }
+        }
 
-      return { success: true, proposal: newProposal }
+        // 1. Verify txHash matches double-SHA256(rawTxHex)
+        const computedTxHash = calculateTxHash(cleanRawHex).toLowerCase()
+        if (computedTxHash !== cleanTxHash) {
+          return {
+            success: false,
+            error: 'txHash does not match double-SHA256 digest of rawTxHex'
+          }
+        }
+
+        // 2. Verify rawTxHex is a valid transaction spending an unspent Developer Fund UTXO signed by Spork Key
+        let decodedTx: any
+        let quorumInfo: any
+        try {
+          quorumInfo = await fetchActiveQuorumForSpend()
+          decodedTx = await callRpc('decoderawtransaction', [cleanRawHex])
+        } catch (err: any) {
+          return {
+            success: false,
+            error: `Failed to decode or validate raw transaction: ${sanitizeRpcErrorMessage(err)}`
+          }
+        }
+
+        if (
+          quorumInfo.treasuryGovernanceStartHeight &&
+          quorumInfo.targetHeight < quorumInfo.treasuryGovernanceStartHeight
+        ) {
+          return {
+            success: false,
+            error: `Developer Fund spending is not active until block #${quorumInfo.treasuryGovernanceStartHeight} (current spend height: #${quorumInfo.targetHeight})`
+          }
+        }
+
+        if (
+          !decodedTx ||
+          !Array.isArray(decodedTx.vin) ||
+          decodedTx.vin.length === 0 ||
+          !Array.isArray(decodedTx.vout) ||
+          decodedTx.vout.length === 0
+        ) {
+          return { success: false, error: 'Decoded transaction has no inputs or outputs' }
+        }
+
+        const cleanTargetAddress = normalizeTaprootAddress(String(targetAddress).trim())
+        const requestedAmount = Number(amount)
+        if (
+          !cleanTargetAddress ||
+          !isValidKristaAddress(cleanTargetAddress, quorumInfo.chain) ||
+          !Number.isFinite(requestedAmount) ||
+          requestedAmount <= 0 ||
+          requestedAmount > 210_000_000
+        ) {
+          return { success: false, error: 'Invalid targetAddress or amount' }
+        }
+
+        const proposals = readProposalsAtomically()
+        const pendingProposals = proposals.filter((p: any) => p.status === 'pending')
+        if (pendingProposals.length >= 50) {
+          return { success: false, error: 'Maximum pending proposals limit (50) reached' }
+        }
+        if (
+          proposals.some(
+            (p: any) => String(p.txHash).toLowerCase() === cleanTxHash && p.status !== 'failed'
+          )
+        ) {
+          return { success: false, error: 'Proposal with this txHash already exists' }
+        }
+
+        for (let i = 0; i < decodedTx.vin.length; i++) {
+          const vin = decodedTx.vin[i]
+          if (!vin.txid || vin.vout === undefined) {
+            return {
+              success: false,
+              error: 'Invalid coinbase or missing input outpoint in proposal transaction'
+            }
+          }
+          // Check UTXO is unspent and belongs to Developer Fund Address
+          const txOut = await callRpc('gettxout', [vin.txid, Number(vin.vout), true])
+          if (!txOut) {
+            return {
+              success: false,
+              error: `Input UTXO ${vin.txid}:${vin.vout} is already spent or does not exist`
+            }
+          }
+          const outAddresses: string[] =
+            txOut.scriptPubKey?.addresses ||
+            (txOut.scriptPubKey?.address ? [txOut.scriptPubKey.address] : [])
+          if (!outAddresses.includes(quorumInfo.developerFundAddress)) {
+            return {
+              success: false,
+              error: `Input UTXO ${vin.txid}:${vin.vout} does not belong to Developer Fund (${quorumInfo.developerFundAddress})`
+            }
+          }
+
+          // Check scriptSig contains <sporkSig> <sporkPubKey> and cryptographically verify Spork ECDSA signature
+          const pushes = extractScriptSigPushesBytes(vin.scriptSig?.hex || '')
+          if (pushes.length < 2) {
+            return {
+              success: false,
+              error: 'Input scriptSig must be pre-signed with Spork signature and Spork public key'
+            }
+          }
+          const sporkVerify = verifySporkInputSignature(
+            cleanRawHex,
+            i,
+            pushes[0]!,
+            pushes[1]!,
+            quorumInfo.sporkPubKey
+          )
+          if (!sporkVerify.valid) {
+            return {
+              success: false,
+              error: `Input #${i} invalid Spork signature: ${sporkVerify.error}`
+            }
+          }
+        }
+
+        // 3. Verify decodedTx.vout matches targetAddress and amount (only targetAddress and Developer Fund change allowed)
+        let targetAmountSats = 0
+        for (let outIdx = 0; outIdx < decodedTx.vout.length; outIdx++) {
+          const vout = decodedTx.vout[outIdx]
+          const voutAddresses: string[] =
+            vout.scriptPubKey?.addresses ||
+            (vout.scriptPubKey?.address ? [vout.scriptPubKey.address] : [])
+          if (voutAddresses.length !== 1) {
+            return {
+              success: false,
+              error: `Output #${outIdx} must have a single standard destination address`
+            }
+          }
+          const outAddr = normalizeTaprootAddress(voutAddresses[0]!)
+          const outSats = Math.round(Number(vout.value) * 1e8)
+          if (outSats <= 0) {
+            return { success: false, error: `Output #${outIdx} has non-positive value` }
+          }
+          if (outAddr === cleanTargetAddress) {
+            targetAmountSats += outSats
+          } else if (outAddr !== quorumInfo.developerFundAddress) {
+            return {
+              success: false,
+              error: `Output #${outIdx} pays unauthorized address ${outAddr}; only targetAddress (${cleanTargetAddress}) and Developer Fund change (${quorumInfo.developerFundAddress}) are allowed`
+            }
+          }
+        }
+
+        const requestedAmountSats = Math.round(requestedAmount * 1e8)
+        if (targetAmountSats <= 0 || targetAmountSats !== requestedAmountSats) {
+          return {
+            success: false,
+            error: `Proposal amount (${requestedAmount} KRISTA) does not match transaction output total to ${cleanTargetAddress} (${targetAmountSats / 1e8} KRISTA)`
+          }
+        }
+
+        const newProposal = {
+          id: crypto.randomUUID(),
+          rawTxHex: cleanRawHex,
+          txHash: cleanTxHash,
+          targetAddress: cleanTargetAddress,
+          amount: targetAmountSats / 1e8,
+          signatures: [],
+          status: 'pending',
+          createdAt: new Date().toISOString()
+        }
+
+        proposals.push(newProposal)
+        writeProposalsAtomically(proposals)
+
+        return { success: true, proposal: newProposal }
+      } finally {
+        releaseLock()
+      }
     }
 
     if (action === 'sign') {
-      const { proposalId, txhash, outidx, pubkey, signature } = body
-      if (!proposalId || !txhash || outidx === undefined || !pubkey || !signature) {
-        return { success: false, error: 'Missing parameters' }
+      const rateCheck = checkApiRateLimit('proposals-sign', clientIp, 30, 60_000)
+      if (!rateCheck.allowed) {
+        setResponseStatus(event, 429)
+        return {
+          success: false,
+          error: `Rate limit exceeded. Try again in ${rateCheck.retryAfterSec}s.`
+        }
       }
 
-      const proposals = readProposals()
-      const proposal = proposals.find((p: any) => p.id === proposalId)
-      if (!proposal) {
-        return { success: false, error: 'Proposal not found' }
-      }
-      if (proposal.status !== 'pending') {
-        return { success: false, error: 'Proposal is not pending' }
+      const releaseLock = acquireProposalLock('proposals-write')
+      if (!releaseLock) {
+        setResponseStatus(event, 409)
+        return {
+          success: false,
+          error: 'Another signature operation is currently in progress. Please retry.'
+        }
       }
 
-      // 1. Fetch active consensus quorum for next block (nSpendHeight = currentHeight + 1)
-      let quorumInfo: any
       try {
-        quorumInfo = await fetchActiveQuorumForSpend()
-      } catch (err: any) {
-        return { success: false, error: `Failed to fetch active quorum: ${err.message}` }
-      }
+        const { proposalId, txhash, outidx, pubkey, signature } = body as Record<string, any>
+        if (!proposalId || !txhash || outidx === undefined || !pubkey || !signature) {
+          return { success: false, error: 'Missing parameters' }
+        }
+        const cleanProposalId = String(proposalId).trim()
+        const cleanTxhash = String(txhash).trim().toLowerCase()
+        const cleanPubkey = String(pubkey).trim()
+        const cleanSignature = String(signature).trim()
+        const cleanOutidx = Number(outidx)
 
-      // 2. Verify that (txhash, outidx, pubkey) is an elected member of the active quorum
-      const electedMember = quorumInfo.members.find((m: any) =>
-        String(m.txhash).toLowerCase() === String(txhash).toLowerCase() &&
-        Number(m.outidx) === Number(outidx) &&
-        pubkeysMatch(String(m.pubkey), String(pubkey))
-      )
-      if (!electedMember) {
-        return { success: false, error: 'Signer is not an elected member of the active quorum for the next block' }
-      }
+        if (
+          cleanProposalId.length > 64 ||
+          !/^[0-9a-fA-F]{64}$/.test(cleanTxhash) ||
+          !Number.isInteger(cleanOutidx) ||
+          cleanOutidx < 0 ||
+          !/^[0-9a-fA-F]{66,130}$/.test(cleanPubkey) ||
+          !/^[0-9a-fA-F]{290,1024}$/.test(cleanSignature)
+        ) {
+          return { success: false, error: 'Invalid signature parameter format' }
+        }
 
-      // 3. Prune any stale signatures from previous quorum epochs so epoch boundaries never brick the proposal
-      proposal.signatures = (proposal.signatures || []).filter((s: any) => {
-        const stillInQuorum = quorumInfo.members.find((m: any) =>
-          String(m.txhash).toLowerCase() === String(s.txhash).toLowerCase() &&
-          Number(m.outidx) === Number(s.outidx) &&
-          pubkeysMatch(String(m.pubkey), String(s.pubkey))
+        const proposals = readProposalsAtomically()
+        const proposal = proposals.find((p: any) => p.id === cleanProposalId)
+        if (!proposal) {
+          return { success: false, error: 'Proposal not found' }
+        }
+        if (proposal.status !== 'pending') {
+          return { success: false, error: 'Proposal is not pending' }
+        }
+
+        // 1. Fetch active consensus quorum for next block (nSpendHeight = currentHeight + 1)
+        let quorumInfo: any
+        try {
+          quorumInfo = await fetchActiveQuorumForSpend()
+        } catch (err: any) {
+          return {
+            success: false,
+            error: `Failed to fetch active quorum: ${sanitizeRpcErrorMessage(err)}`
+          }
+        }
+
+        // 2. Verify that (txhash, outidx, pubkey|operatorPubKey) is an elected member of the active quorum
+        const electedMember = quorumInfo.members.find(
+          (m: any) =>
+            String(m.txhash).toLowerCase() === cleanTxhash &&
+            Number(m.outidx) === cleanOutidx &&
+            (pubkeysMatch(String(m.pubkey), cleanPubkey) ||
+              (m.operatorPubKey && blsPubKeysMatch(String(m.operatorPubKey), cleanPubkey)))
         )
-        if (!stillInQuorum) return false
-        return verifyAndParseBLSSignedData(s.signature, proposal.txHash, stillInQuorum.pubkey).valid
-      })
-
-      // 4. Check if already signed by this masternode in the current active quorum
-      const alreadySigned = proposal.signatures.some((s: any) =>
-        String(s.txhash).toLowerCase() === String(electedMember.txhash).toLowerCase() &&
-        Number(s.outidx) === Number(electedMember.outidx)
-      )
-      if (alreadySigned) {
-        return { success: false, error: 'Already signed by this masternode' }
-      }
-
-      // 5. Verify hybrid BLS12-381 + secp256k1 signature (CBLSSignedData) against canonical electedMember.pubkey
-      const verifyResult = verifyAndParseBLSSignedData(signature, proposal.txHash, electedMember.pubkey)
-      if (!verifyResult.valid) {
-        return { success: false, error: verifyResult.error || 'Invalid hybrid BLS12-381 + ECDSA signature' }
-      }
-
-      // Save the signature using canonical quorum member fields
-      proposal.signatures.push({
-        txhash: electedMember.txhash,
-        outidx: Number(electedMember.outidx),
-        pubkey: electedMember.pubkey,
-        signature
-      })
-
-      const threshold = quorumInfo.threshold
-
-      if (proposal.signatures.length >= threshold) {
-        // Verify aggregated BLS12-381 signature across all signing quorum members (matching src/llmq.cpp:101-105)
-        try {
-          const parsedPks: Uint8Array[] = []
-          const parsedSigs: Uint8Array[] = []
-          for (const item of proposal.signatures) {
-            const p = verifyAndParseBLSSignedData(item.signature, proposal.txHash, item.pubkey)
-            if (p.valid && p.blsPubKey && p.blsSig) {
-              parsedPks.push(p.blsPubKey)
-              parsedSigs.push(p.blsSig)
-            }
+        if (!electedMember) {
+          return {
+            success: false,
+            error: 'Signer is not an elected member of the active quorum for the next block'
           }
-          const aggPk = bls12_381.aggregatePublicKeys(parsedPks)
-          const aggSig = bls12_381.aggregateSignatures(parsedSigs)
-          const msgBlockHash = new Uint8Array(Buffer.from(proposal.txHash, 'hex').reverse())
-          if (!bls12_381.verify(aggSig, msgBlockHash, aggPk, { DST: BLS_DST })) {
-            return { success: false, error: 'Aggregated BLS12-381 quorum signature verification failed' }
-          }
-        } catch (aggErr: any) {
-          return { success: false, error: `BLS aggregation failed: ${aggErr.message}` }
         }
 
-        // Serialize CQuorumSignature and inject into all transaction inputs
-        const qsigBuf = serializeQuorumSignature(proposal.txHash, proposal.signatures)
-        const qsigPush = Buffer.concat([
-          getPushDataPrefix(qsigBuf.length),
-          qsigBuf
-        ])
+        // 3. Prune any stale signatures from previous quorum epochs so epoch boundaries never brick the proposal
+        proposal.signatures = (proposal.signatures || []).filter((s: any) => {
+          const stillInQuorum = quorumInfo.members.find(
+            (m: any) =>
+              String(m.txhash).toLowerCase() === String(s.txhash).toLowerCase() &&
+              Number(m.outidx) === Number(s.outidx) &&
+              (pubkeysMatch(String(m.pubkey), String(s.pubkey)) ||
+                (m.operatorPubKey && blsPubKeysMatch(String(m.operatorPubKey), String(s.pubkey))))
+          )
+          if (!stillInQuorum) return false
+          return verifyAndParseBLSSignedData(
+            s.signature,
+            proposal.txHash,
+            stillInQuorum.pubkey,
+            stillInQuorum.operatorPubKey
+          ).valid
+        })
 
-        const finalTxBuf = injectQuorumSigIntoRawTx(proposal.rawTxHex, qsigPush)
-        const finalTxHex = finalTxBuf.toString('hex')
+        // 4. Check if already signed by this masternode in the current active quorum
+        const alreadySigned = proposal.signatures.some(
+          (s: any) =>
+            String(s.txhash).toLowerCase() === String(electedMember.txhash).toLowerCase() &&
+            Number(s.outidx) === Number(electedMember.outidx)
+        )
+        if (alreadySigned) {
+          return { success: false, error: 'Already signed by this masternode' }
+        }
 
-        try {
-          const broadcastResult = await callRpc('sendrawtransaction', [finalTxHex])
-          proposal.status = 'broadcasted'
-          proposal.finalTxid = broadcastResult
-          proposal.finalTxHex = finalTxHex
-          delete proposal.error
-        } catch (broadcastErr: any) {
-          // Do not permanently lock the proposal in 'failed' state if the UTXO is still unspent
-          proposal.error = broadcastErr.message
+        // 5. Verify KTDIP3 operator BLS or hybrid BLS12-381 + secp256k1 signature (CBLSSignedData)
+        const verifyResult = verifyAndParseBLSSignedData(
+          cleanSignature,
+          proposal.txHash,
+          electedMember.pubkey,
+          electedMember.operatorPubKey
+        )
+        if (!verifyResult.valid) {
+          return {
+            success: false,
+            error: verifyResult.error || 'Invalid BLS12-381 / ECDSA quorum signature'
+          }
+        }
+
+        // Save the signature using canonical quorum member fields
+        proposal.signatures.push({
+          txhash: electedMember.txhash,
+          outidx: Number(electedMember.outidx),
+          pubkey: cleanSignature.length === 290 && electedMember.operatorPubKey
+            ? electedMember.operatorPubKey
+            : electedMember.pubkey,
+          operatorPubKey: electedMember.operatorPubKey,
+          signature: cleanSignature,
+          timestamp: Date.now()
+        })
+
+        const threshold = quorumInfo.threshold
+
+        if (proposal.signatures.length >= threshold) {
+          // Verify aggregated BLS12-381 signature across all signing quorum members (matching src/llmq.cpp:101-105)
+          const aggCheck = verifyAggregatedBLSSignatures(proposal.txHash, proposal.signatures)
+          if (!aggCheck.valid) {
+            return {
+              success: false,
+              error: aggCheck.error || 'Aggregated BLS12-381 quorum signature verification failed'
+            }
+          }
+
+          // Serialize CQuorumSignature and inject into all transaction inputs
+          const qsigBuf = serializeQuorumSignatureBytes(proposal.txHash, proposal.signatures)
+          const qsigPush = concatBytes(getPushDataPrefixBytes(qsigBuf.length), qsigBuf)
+
+          const finalTxBuf = injectQuorumSigIntoRawTxBytes(proposal.rawTxHex, qsigPush)
+          const finalTxHex = bytesToHex(finalTxBuf)
+
           try {
-            const decoded = await callRpc('decoderawtransaction', [proposal.rawTxHex])
-            const firstVin = decoded?.vin?.[0]
-            const txOut = firstVin ? await callRpc('gettxout', [firstVin.txid, Number(firstVin.vout), true]) : null
-            if (!txOut) {
-              proposal.status = 'failed'
+            const broadcastResult = await callRpc('sendrawtransaction', [finalTxHex])
+            proposal.status = 'broadcasted'
+            proposal.finalTxid = broadcastResult
+            proposal.broadcastTxId = broadcastResult
+            proposal.finalTxHex = finalTxHex
+            delete proposal.error
+            delete proposal.broadcastError
+          } catch (broadcastErr: any) {
+            // Do not permanently lock the proposal in 'failed' state if the UTXO is still unspent
+            const safeErr = sanitizeRpcErrorMessage(broadcastErr)
+            proposal.error = safeErr
+            proposal.broadcastError = safeErr
+            try {
+              const decoded = await callRpc('decoderawtransaction', [proposal.rawTxHex])
+              const firstVin = decoded?.vin?.[0]
+              const txOut = firstVin
+                ? await callRpc('gettxout', [firstVin.txid, Number(firstVin.vout), true])
+                : null
+              if (!txOut) {
+                proposal.status = 'failed'
+              }
+            } catch {
+              // Keep status = 'pending' so quorum members can retry after epoch/sync transition
             }
-          } catch {
-            // Keep status = 'pending' so quorum members can retry after epoch/sync transition
           }
         }
-      }
 
-      writeProposals(proposals)
-      return { success: true, proposal }
+        writeProposalsAtomically(proposals)
+        return { success: true, proposal }
+      } finally {
+        releaseLock()
+      }
     }
+
+    return { success: false, error: 'Unsupported action' }
   }
 
+  setResponseStatus(event, 405)
   return { error: 'Method not allowed' }
 })

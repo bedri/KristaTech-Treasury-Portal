@@ -1,520 +1,1362 @@
-<template>
-  <div class="space-y-8 max-w-6xl mx-auto">
-    <!-- Header -->
-    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-6">
-      <div>
-        <h1 class="text-3xl font-extrabold tracking-tight text-white sm:text-4xl bg-gradient-to-r from-primary-400 to-indigo-400 bg-clip-text text-transparent">
-          KristaTech Hazine Portalı
-        </h1>
-        <p class="mt-2 text-sm text-slate-400">
-          Developer Fund (Hazine) harcamalarını takip edin, aktif quorum üyeliğinizi doğrulayın ve teklifleri tarayıcınızda yerel olarak imzalayın.
-        </p>
-      </div>
-      <div class="flex items-center gap-3">
-        <UButton
-          to="/admin"
-          color="primary"
-          icon="i-heroicons-plus-20-solid"
-          size="lg"
-          class="bg-gradient-to-r from-primary-500 to-indigo-600 hover:from-primary-600 hover:to-indigo-700 shadow-lg shadow-primary-500/20"
-        >
-          Yeni Teklif Oluştur
-        </UButton>
-      </div>
-    </div>
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { useI18n } from '~/composables/useI18n'
+import {
+  CORE_VERSION,
+  PROTOCOL_VERSION,
+  blsPubKeysMatch,
+  deriveBlsPubKeyFromSecret,
+  derivePubKeysFromWIF,
+  getQuorumMajorityThreshold,
+  pubkeysMatch,
+  createHybridBLSSignedData,
+  createOperatorBLSSignedData
+} from '~/utils/treasuryCrypto'
 
-    <!-- Network Info & Quorum -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <!-- Status Card -->
-      <UCard class="bg-slate-900/60 border border-slate-800/80 backdrop-blur-md lg:col-span-1">
-        <template #header>
-          <div class="flex items-center gap-2">
-            <UIcon name="i-heroicons-cpu-chip" class="text-primary-400 text-xl" />
-            <h3 class="font-bold text-white">Ağ Durumu</h3>
-          </div>
-        </template>
-        
-        <div v-if="quorumLoading" class="space-y-3 py-4">
-          <USkeleton class="h-4 w-[200px] bg-slate-800" />
-          <USkeleton class="h-4 w-[150px] bg-slate-800" />
-          <USkeleton class="h-4 w-[250px] bg-slate-800" />
-        </div>
-        <div v-else-if="quorumData" class="space-y-4 text-sm">
-          <div class="flex justify-between border-b border-slate-800/50 pb-2">
-            <span class="text-slate-400">Güncel Blok Yüksekliği</span>
-            <span class="font-mono text-white font-bold">{{ quorumData.currentHeight }}</span>
-          </div>
-          <div class="flex justify-between border-b border-slate-800/50 pb-2">
-            <span class="text-slate-400">Aktif DKG Yüksekliği</span>
-            <span class="font-mono text-white font-bold">{{ quorumData.dkgHeight }}</span>
-          </div>
-          <div class="flex flex-col gap-1">
-            <span class="text-slate-400">Aktif Quorum Seed ({{ quorumData.seedHeight }})</span>
-            <span class="font-mono text-xs text-primary-400 break-all bg-slate-950/60 p-2 rounded border border-slate-800">{{ quorumData.seed }}</span>
-          </div>
-        </div>
-      </UCard>
+interface QuorumMember {
+  rank?: number
+  txhash: string
+  outidx: number
+  pubkey: string
+  operatorPubKey?: string
+  dip3?: boolean
+  addr?: string
+  status?: string
+  ip?: string
+}
 
-      <!-- Active Quorum Members -->
-      <UCard class="bg-slate-900/60 border border-slate-800/80 backdrop-blur-md lg:col-span-2">
-        <template #header>
-          <div class="flex items-center gap-2">
-            <UIcon name="i-heroicons-user-group" class="text-primary-400 text-xl" />
-            <h3 class="font-bold text-white">Aktif Quorum Üyeleri (Seçmen Masternode'lar)</h3>
-          </div>
-        </template>
+interface QuorumResponse {
+  success: boolean
+  coreVersion?: string
+  protocolVersion?: number
+  chain?: string
+  currentHeight?: number
+  targetHeight?: number
+  dkgHeight?: number
+  quorumHash?: string
+  seedHeight?: number
+  seed?: string
+  developerFundAddress?: string
+  sporkPubKey?: string
+  treasuryGovernanceStartHeight?: number
+  activeMasternodeCount?: number
+  totalMasternodeCount?: number
+  targetQuorumSize?: number
+  threshold?: number
+  members?: QuorumMember[]
+  error?: string
+}
 
-        <div v-if="quorumLoading" class="space-y-3 py-2">
-          <USkeleton class="h-10 w-full bg-slate-800" />
-          <USkeleton class="h-10 w-full bg-slate-800" />
-          <USkeleton class="h-10 w-full bg-slate-800" />
-        </div>
-        <div v-else-if="quorumData && quorumData.members" class="overflow-x-auto">
-          <table class="w-full text-left border-collapse text-sm">
-            <thead>
-              <tr class="border-b border-slate-800 text-slate-400">
-                <th class="py-2 font-semibold">IP Adresi</th>
-                <th class="py-2 font-semibold">Teminat İşlem Hash'i (Collateral)</th>
-                <th class="py-2 font-semibold text-right">Durum</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800/40">
-              <tr v-for="(member, idx) in quorumData.members" :key="idx" class="hover:bg-slate-800/20 transition-colors">
-                <td class="py-3 font-mono text-white font-semibold">{{ member.ip }}</td>
-                <td class="py-3 font-mono text-xs text-slate-400">{{ member.txhash }}:{{ member.outidx }}</td>
-                <td class="py-3 text-right">
-                  <UBadge color="primary" variant="subtle" size="xs">SEÇMEN</UBadge>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </UCard>
-    </div>
+interface ProposalSignature {
+  txhash: string
+  outidx: number
+  pubkey: string
+  signature: string
+  timestamp?: number
+}
 
-    <!-- Active Proposals -->
-    <div class="space-y-4">
-      <h2 class="text-2xl font-bold text-white flex items-center gap-2">
-        <UIcon name="i-heroicons-document-text" class="text-primary-400" /> Aktif Teklifler ve İmza Durumu
-      </h2>
+interface ProposalItem {
+  id: string
+  txHash: string
+  rawTxHex: string
+  targetAddress: string
+  amount: number
+  signatures: ProposalSignature[]
+  status: 'pending' | 'broadcasted' | 'failed'
+  finalTxid?: string
+  broadcastTxId?: string
+  error?: string
+  broadcastError?: string
+  createdAt: string | number
+}
 
-      <div v-if="proposalsLoading" class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <UCard v-for="i in 2" :key="i" class="bg-slate-900/60 border border-slate-800/80">
-          <USkeleton class="h-6 w-[200px] bg-slate-800 mb-4" />
-          <USkeleton class="h-4 w-full bg-slate-800 mb-2" />
-          <USkeleton class="h-4 w-full bg-slate-800" />
-        </UCard>
-      </div>
-
-      <div v-else-if="proposals.length === 0" class="text-center py-12 bg-slate-900/30 border border-dashed border-slate-800 rounded-xl">
-        <UIcon name="i-heroicons-inbox" class="text-5xl text-slate-600 mb-2" />
-        <p class="text-slate-400">Şu an aktif veya oylanan bir hazine harcama teklifi bulunmuyor.</p>
-      </div>
-
-      <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <UCard
-          v-for="proposal in proposals"
-          :key="proposal.id"
-          class="bg-slate-900/60 border border-slate-800/80 backdrop-blur-md flex flex-col justify-between"
-        >
-          <div class="space-y-4">
-            <div class="flex items-start justify-between">
-              <div>
-                <span class="text-xs text-slate-400">Harcama Teklifi</span>
-                <h3 class="text-xl font-bold text-white mt-1">{{ proposal.amount }} KRISTA</h3>
-              </div>
-              <UBadge
-                :color="proposal.status === 'broadcasted' ? 'green' : proposal.status === 'failed' ? 'red' : 'primary'"
-                variant="solid"
-              >
-                {{ proposal.status === 'broadcasted' ? 'AĞA YAYINLANDI' : proposal.status === 'failed' ? 'BAŞARISIZ' : 'OYLAMADA' }}
-              </UBadge>
-            </div>
-
-            <div class="text-sm space-y-2 border-t border-slate-800/50 pt-3">
-              <div class="flex justify-between">
-                <span class="text-slate-400">Hedef Adres</span>
-                <span class="font-mono text-white text-xs select-all">{{ proposal.targetAddress }}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-slate-400">İşlem Hash (Message)</span>
-                <span class="font-mono text-xs text-primary-400 select-all">{{ proposal.txHash }}</span>
-              </div>
-            </div>
-
-            <!-- Signatures Progress -->
-            <div class="space-y-2">
-              <div class="flex justify-between text-xs">
-                <span class="text-slate-400 font-semibold">Toplanan Quorum İmzası</span>
-                <span class="text-white font-bold">{{ proposal.signatures.length }} / {{ threshold }}</span>
-              </div>
-              <UProgress :value="proposal.signatures.length" :max="threshold" color="primary" />
-            </div>
-
-            <!-- Signed Masternodes List -->
-            <div v-if="proposal.signatures.length > 0" class="space-y-1">
-              <span class="text-xs text-slate-400 font-semibold">İmzalayan Düğümler:</span>
-              <div class="flex flex-wrap gap-1">
-                <UBadge
-                  v-for="(sig, sIdx) in proposal.signatures"
-                  :key="sIdx"
-                  color="gray"
-                  variant="subtle"
-                  size="xs"
-                  class="font-mono"
-                >
-                  {{ sig.txhash.substring(0, 8) }}...:{{ sig.outidx }}
-                </UBadge>
-              </div>
-            </div>
-          </div>
-
-          <!-- Signing Action for Voters -->
-          <div v-if="proposal.status === 'pending'" class="mt-6 border-t border-slate-800/50 pt-4 space-y-4">
-            <div v-if="isUserInQuorum" class="bg-primary-950/20 border border-primary-800/40 rounded-lg p-3 text-xs text-primary-300">
-              <div class="flex items-center gap-1 font-bold mb-1">
-                <UIcon name="i-heroicons-check-circle-20-solid" /> Tebrikler! Masternode'unuz Aktif Quorum Üyesi (Sıra #{{ matchedQuorumMemberIndex + 1 }})
-              </div>
-              Girdiğiniz WIF anahtarı aktif kuorumdaki masternode ile eşleşti. Aşağıdaki butonla teklifi tarayıcınızda imzalayabilirsiniz.
-            </div>
-            <div v-else class="bg-slate-950/40 border border-slate-800/60 rounded-lg p-3 text-xs text-slate-400">
-              <div class="flex items-center gap-1 font-bold text-slate-300 mb-1">
-                <UIcon name="i-heroicons-key-20-solid" /> Aktif Quorum Üyesi Masternode İmza Alanı
-              </div>
-              Masternode'unuz aktif kuorumdaysa listeden seçip özel anahtarınızı (WIF) girerek bu teklifi tarayıcınızda imzalayabilirsiniz.
-            </div>
-
-            <div class="flex flex-col gap-2">
-              <UFormGroup label="Masternode Seç" size="sm">
-                <USelect
-                  v-model="signForm.selectedMnIndex"
-                  :options="quorumOptions"
-                  placeholder="İmza atacak masternode'u seçin"
-                  class="bg-slate-950/40"
-                />
-              </UFormGroup>
-
-              <UFormGroup label="Masternode Private Key (WIF)" size="sm">
-                <UInput
-                  v-model="signForm.wifKey"
-                  type="password"
-                  placeholder="Masternode Private Key (örn. 2UNUY2rGp...)"
-                  icon="i-heroicons-key"
-                  class="bg-slate-950/40"
-                />
-              </UFormGroup>
-
-              <UButton
-                color="primary"
-                block
-                class="bg-gradient-to-r from-primary-500 to-indigo-600 hover:from-primary-600 hover:to-indigo-700"
-                :loading="signingLoading"
-                @click="signProposal(proposal)"
-              >
-                Teklifi Yerel Olarak İmzala ve Oy Ver
-              </UButton>
-            </div>
-          </div>
-
-          <!-- Final transaction info if broadcasted -->
-          <div v-if="proposal.status === 'broadcasted'" class="mt-4 border-t border-slate-800/50 pt-3 text-xs text-green-400 space-y-1">
-            <div class="font-bold flex items-center gap-1">
-              <UIcon name="i-heroicons-check-circle-20-solid" /> İşlem Ağa Yayınlandı!
-            </div>
-            <div class="break-all font-mono">
-              TxID: <span class="select-all text-white font-bold">{{ proposal.finalTxid }}</span>
-            </div>
-          </div>
-          <div v-if="proposal.status === 'failed'" class="mt-4 border-t border-slate-800/50 pt-3 text-xs text-red-400 space-y-1">
-            <div class="font-bold flex items-center gap-1">
-              <UIcon name="i-heroicons-x-circle-20-solid" /> Yayınlama Hatası
-            </div>
-            <div class="break-all font-mono text-slate-300">
-              {{ proposal.error }}
-            </div>
-          </div>
-        </UCard>
-      </div>
-    </div>
-  </div>
-</template>
-
-<script setup>
-import elliptic from 'elliptic'
-import { bls12_381 } from '@noble/curves/bls12-381'
-import { sha256 } from '@noble/hashes/sha256'
-
-const ec = new elliptic.ec('secp256k1')
-const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
+const { t } = useI18n()
 const toast = useToast()
 
-const networkState = useState('network', () => 'main')
+const {
+  data: quorumData,
+  pending: quorumLoading,
+  refresh: refreshQuorum
+} = await useFetch<QuorumResponse>('/api/quorum')
 
-const quorumData = ref(null)
-const quorumLoading = ref(true)
+const {
+  data: proposals,
+  pending: proposalsLoading,
+  refresh: refreshProposals
+} = await useFetch<ProposalItem[]>('/api/proposals')
 
-const proposals = ref([])
-const proposalsLoading = ref(true)
+const selectedNode = ref('')
+const wifKey = ref('')
+const showWif = ref(false)
+const wifTouched = ref(false)
+const isSigning = ref(false)
+const statusFilter = ref<'all' | 'pending' | 'broadcasted' | 'failed'>('all')
+const searchQuery = ref('')
 
-const threshold = ref(3) // Default to 3/5 majority
+function getMemberKey(member: QuorumMember): string {
+  return `${String(member.txhash).toLowerCase()}:${Number(member.outidx)}`
+}
 
-const signForm = ref({
-  selectedMnIndex: '',
-  wifKey: ''
+const quorumMembers = computed<QuorumMember[]>(() => {
+  return Array.isArray(quorumData.value?.members) ? quorumData.value!.members! : []
 })
-const signingLoading = ref(false)
 
-// Fetch Quorum Status
-async function fetchQuorum() {
-  quorumLoading.value = true
+// Derive public keys reactively from WIF or 64-hex KTDIP3 BLS Operator Secret (strictly in browser memory)
+const derivedWallet = computed(() => {
+  const clean = wifKey.value.trim()
+  if (!clean) return null
   try {
-    const res = await $fetch('/api/quorum')
-    if (res.success) {
-      quorumData.value = res
-      networkState.value = res.chain
-      // Majority threshold: 3 for 5-member quorum, 2 for smaller regtest quorum
-      threshold.value = (res.members.length < 5) ? 2 : 3
+    if (/^[0-9a-fA-F]{64}$/.test(clean)) {
+      const bls = deriveBlsPubKeyFromSecret(clean)
+      return {
+        mode: 'bls-operator' as const,
+        blsSecretHex: bls.blsSecretHex,
+        blsPubKeyHex: bls.blsPubKeyHex,
+        compressedPubKey: bls.blsPubKeyHex
+      }
     }
-  } catch (err) {
-    console.error('Error fetching quorum:', err)
-  } finally {
-    quorumLoading.value = false
+    const wif = derivePubKeysFromWIF(clean)
+    return {
+      mode: 'wif' as const,
+      ...wif
+    }
+  } catch {
+    return null
+  }
+})
+
+const matchedQuorumMember = computed<QuorumMember | null>(() => {
+  if (!derivedWallet.value || quorumMembers.value.length === 0) return null
+  for (const member of quorumMembers.value) {
+    if (derivedWallet.value.mode === 'bls-operator') {
+      const candidateOp = member.operatorPubKey || member.pubkey
+      if (blsPubKeysMatch(derivedWallet.value.blsPubKeyHex, candidateOp)) {
+        return member
+      }
+    } else if (pubkeysMatch(derivedWallet.value.compressedPubKey, member.pubkey)) {
+      return member
+    }
+  }
+  return null
+})
+
+// Auto-select matched node in dropdown when WIF matches a quorum member
+function syncSelectedNodeFromWif() {
+  if (matchedQuorumMember.value) {
+    selectedNode.value = getMemberKey(matchedQuorumMember.value)
   }
 }
 
-// Fetch Proposals
-async function fetchProposals() {
-  proposalsLoading.value = true
-  try {
-    const res = await $fetch('/api/proposals')
-    proposals.value = res
-  } catch (err) {
-    console.error('Error fetching proposals:', err)
-  } finally {
-    proposalsLoading.value = false
+function onWifInput() {
+  if (wifTouched.value && derivedWallet.value) {
+    wifTouched.value = false
   }
+  syncSelectedNodeFromWif()
 }
 
-// Check if the entered WIF key matches one of the 5 active quorum members
-const matchedQuorumMemberIndex = computed(() => {
-  if (!quorumData.value || !Array.isArray(quorumData.value.members) || !signForm.value.wifKey) {
-    return -1
+function onWifBlur() {
+  if (wifKey.value.trim().length > 0) {
+    wifTouched.value = true
   }
+  syncSelectedNodeFromWif()
+}
+
+function clearWifKey() {
+  wifKey.value = ''
+  wifTouched.value = false
+  showWif.value = false
+}
+
+const wifHasError = computed(() => {
+  return wifTouched.value && wifKey.value.trim().length > 0 && !derivedWallet.value
+})
+
+const quorumSize = computed(
+  () => quorumMembers.value.length || quorumData.value?.targetQuorumSize || 5
+)
+
+const quorumThreshold = computed(() => {
+  if (quorumData.value?.threshold) {
+    return Number(quorumData.value.threshold)
+  }
+  return getQuorumMajorityThreshold(quorumSize.value)
+})
+
+const pendingProposalsCount = computed(() => {
+  if (!proposals.value) return 0
+  return proposals.value.filter((p) => p.status === 'pending').length
+})
+
+const totalProposalVolume = computed(() => {
+  if (!proposals.value) return 0
+  return proposals.value.reduce((acc, item) => acc + (Number(item.amount) || 0), 0)
+})
+
+const filteredProposals = computed(() => {
+  if (!proposals.value) return []
+  const query = searchQuery.value.trim().toLowerCase()
+  return proposals.value.filter((p) => {
+    if (statusFilter.value !== 'all' && p.status !== statusFilter.value) {
+      return false
+    }
+    if (!query) return true
+    return (
+      p.targetAddress.toLowerCase().includes(query) ||
+      p.txHash.toLowerCase().includes(query) ||
+      p.id.toLowerCase().includes(query)
+    )
+  })
+})
+
+function hasNodeSigned(proposal: ProposalItem, memberKey: string): boolean {
+  if (!memberKey || !proposal.signatures) return false
+  return proposal.signatures.some(
+    (s) => `${String(s.txhash).toLowerCase()}:${Number(s.outidx)}` === memberKey.toLowerCase()
+  )
+}
+
+async function copyText(value: string) {
+  if (!value || typeof navigator === 'undefined' || !navigator.clipboard) return
   try {
-    const privKeyHex = getRawPrivateKeyFromWIF(signForm.value.wifKey.trim())
-    const key = ec.keyFromPrivate(privKeyHex, 'hex')
-    const compressedPub = key.getPublic(true, 'hex').toLowerCase()
-    const uncompressedPub = key.getPublic(false, 'hex').toLowerCase()
-    return quorumData.value.members.findIndex((mn) => {
-      const mnPub = String(mn.pubkey || '').toLowerCase()
-      return mnPub === compressedPub || mnPub === uncompressedPub
+    await navigator.clipboard.writeText(value)
+    toast.add({
+      title: t('copiedToast'),
+      color: 'success'
     })
   } catch {
-    return -1
-  }
-})
-
-watch(matchedQuorumMemberIndex, (idx) => {
-  if (idx !== -1) {
-    signForm.value.selectedMnIndex = idx
-  }
-})
-
-// True only when the user has entered a valid WIF key belonging to an active quorum member
-const isUserInQuorum = computed(() => {
-  return matchedQuorumMemberIndex.value !== -1
-})
-
-// Quorum options for select
-const quorumOptions = computed(() => {
-  if (!quorumData.value || !quorumData.value.members) return []
-  return quorumData.value.members.map((mn, idx) => ({
-    label: `${mn.ip} (${mn.txhash.substring(0, 8)}...:${mn.outidx})`,
-    value: idx
-  }))
-})
-
-// Base58 decoding helper (standard zero-dependency implementation)
-const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-const ALPHABET_MAP = {}
-for (let i = 0; i < ALPHABET.length; i++) {
-  ALPHABET_MAP[ALPHABET[i]] = i
-}
-
-function decodeBase58(string) {
-  let bytes = [0]
-  for (let i = 0; i < string.length; i++) {
-    let c = string[i]
-    if (!(c in ALPHABET_MAP)) throw new Error('Geçersiz karakter')
-    let carry = ALPHABET_MAP[c]
-    for (let j = 0; j < bytes.length; j++) {
-      carry += bytes[j] * 58
-      bytes[j] = carry & 0xff
-      carry >>= 8
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff)
-      carry >>= 8
-    }
-  }
-  for (let i = 0; string[i] === '1' && i < string.length - 1; i++) {
-    bytes.push(0)
-  }
-  return new Uint8Array(bytes.reverse())
-}
-
-function getRawPrivateKeyFromWIF(wifString) {
-  const decoded = decodeBase58(wifString)
-  // WIF is: [prefix (1B)] [privkey (32B)] [optional compression flag 0x01 (1B)] [checksum (4B)]
-  if (decoded.length !== 37 && (decoded.length !== 38 || decoded[33] !== 0x01)) {
-    throw new Error('Geçersiz WIF uzunluğu veya sıkıştırma bayrağı')
-  }
-  const payload = decoded.slice(0, decoded.length - 4)
-  const checksum = decoded.slice(decoded.length - 4)
-  const expectedChecksum = sha256(sha256(payload)).slice(0, 4)
-  for (let i = 0; i < 4; i++) {
-    if (checksum[i] !== expectedChecksum[i]) {
-      throw new Error('WIF Base58Check sağlama toplamı (checksum) geçersiz')
-    }
-  }
-
-  const rawKey = decoded.slice(1, 33)
-  let hex = ''
-  for (let i = 0; i < rawKey.length; i++) {
-    hex += rawKey[i].toString(16).padStart(2, '0')
-  }
-  return hex
-}
-
-function hexToBytes(hex) {
-  const clean = hex.trim()
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(clean.substr(i * 2, 2), 16)
-  }
-  return out
-}
-
-function bytesToHex(bytes) {
-  let hex = ''
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, '0')
-  }
-  return hex
-}
-
-function writeCompactSizeBytes(size) {
-  if (size < 253) {
-    return new Uint8Array([size])
-  } else if (size <= 0xffff) {
-    return new Uint8Array([253, size & 0xff, (size >> 8) & 0xff])
-  } else {
-    return new Uint8Array([
-      254,
-      size & 0xff,
-      (size >> 8) & 0xff,
-      (size >> 16) & 0xff,
-      (size >> 24) & 0xff
-    ])
+    // Ignore clipboard failure
   }
 }
 
-async function signProposal(proposal) {
-  if (signForm.value.selectedMnIndex === '' || !signForm.value.wifKey) {
+async function refreshAll() {
+  await Promise.all([refreshQuorum(), refreshProposals()])
+}
+
+async function signProposal(proposal: ProposalItem) {
+  if (!selectedNode.value || !wifKey.value.trim()) {
+    wifTouched.value = true
     toast.add({
-      title: 'Eksik Bilgi',
-      description: 'Lütfen masternode seçin ve özel anahtarınızı (WIF) girin.',
-      color: 'red'
+      title: t('toastMissingTitle'),
+      description: t('toastMissingSignDesc'),
+      color: 'warning'
     })
     return
   }
 
-  signingLoading.value = true
+  isSigning.value = true
   try {
-    const selectedMn = quorumData.value.members[signForm.value.selectedMnIndex]
-    
-    // 1. Decode private key
-    let privKeyHex = ''
+    const cleanWif = wifKey.value.trim()
+    let wallet:
+      | ({ mode: 'bls-operator' } & ReturnType<typeof deriveBlsPubKeyFromSecret>)
+      | ({ mode: 'wif' } & ReturnType<typeof derivePubKeysFromWIF>)
     try {
-      privKeyHex = getRawPrivateKeyFromWIF(signForm.value.wifKey.trim())
+      if (/^[0-9a-fA-F]{64}$/.test(cleanWif)) {
+        wallet = { mode: 'bls-operator', ...deriveBlsPubKeyFromSecret(cleanWif) }
+      } else {
+        wallet = { mode: 'wif', ...derivePubKeysFromWIF(cleanWif) }
+      }
     } catch {
-      throw new Error('Geçersiz WIF formatı. Lütfen anahtarınızı kontrol edin.')
+      wifTouched.value = true
+      throw new Error(t('quorumInvalidWifDesc'))
     }
 
-    // 2. Derive public key and verify it matches the elected masternode public key
-    const key = ec.keyFromPrivate(privKeyHex, 'hex')
-    const derivedPubHex = key.getPublic(true, 'hex') // Compressed pubkey hex
-    
-    if (derivedPubHex.toLowerCase() !== selectedMn.pubkey.toLowerCase() &&
-        key.getPublic(false, 'hex').toLowerCase() !== selectedMn.pubkey.toLowerCase()) {
-      throw new Error('Girdiğiniz özel anahtar seçtiğiniz masternode\'un public key\'i ile eşleşmiyor!')
+    const activeNode = quorumMembers.value.find(
+      (n) => getMemberKey(n) === selectedNode.value.toLowerCase()
+    )
+    if (!activeNode) {
+      throw new Error(t('toastMissingSignDesc'))
     }
 
-    // 3. Build hybrid CBLSSignedData (blsPubKey[48B] + blsSig[96B] + compactSize + ecdsaSig[DER])
-    // matching CQuorumSignature::Verify in src/llmq.cpp:43-108
-    const privKeyBytes = hexToBytes(privKeyHex)
-    const msgBlockHash = hexToBytes(proposal.txHash).reverse() // 32-byte little-endian internal uint256
+    let signedDataHex = ''
+    let signerPubkey = activeNode.pubkey
+    if (wallet.mode === 'bls-operator') {
+      const candidateOp = activeNode.operatorPubKey || activeNode.pubkey
+      if (!blsPubKeysMatch(wallet.blsPubKeyHex, candidateOp)) {
+        throw new Error(t('toastKeyMismatch'))
+      }
+      signedDataHex = createOperatorBLSSignedData(wallet.blsSecretHex, proposal.txHash).signedDataHex
+      signerPubkey = candidateOp
+    } else {
+      if (!pubkeysMatch(wallet.compressedPubKey, activeNode.pubkey)) {
+        throw new Error(t('toastKeyMismatch'))
+      }
+      signedDataHex = createHybridBLSSignedData(wallet.privKeyHex, proposal.txHash).signedDataHex
+    }
 
-    const seedInput = new Uint8Array(privKeyBytes.length + msgBlockHash.length)
-    seedInput.set(privKeyBytes, 0)
-    seedInput.set(msgBlockHash, privKeyBytes.length)
-    const blsPrivKey = sha256(sha256(seedInput))
-    blsPrivKey[0] &= 0x3f // Ensure scalar < BLS12-381 curve order r
-    if (blsPrivKey.every((b) => b === 0)) blsPrivKey[31] = 1
-
-    const blsPubKey = bls12_381.getPublicKey(blsPrivKey) // 48 bytes
-    const blsSig = bls12_381.sign(msgBlockHash, blsPrivKey, { DST: BLS_DST }) // 96 bytes
-
-    // Sign Hash(blsPubKey) (double-SHA256) with Masternode secp256k1 key
-    const hashPubKey = sha256(sha256(blsPubKey))
-    const ecdsaSig = key.sign(Array.from(hashPubKey), { canonical: true })
-    const ecdsaDerBytes = new Uint8Array(ecdsaSig.toDER())
-    const ecdsaCompactLen = writeCompactSizeBytes(ecdsaDerBytes.length)
-
-    const signedDataBytes = new Uint8Array(48 + 96 + ecdsaCompactLen.length + ecdsaDerBytes.length)
-    signedDataBytes.set(blsPubKey, 0)
-    signedDataBytes.set(blsSig, 48)
-    signedDataBytes.set(ecdsaCompactLen, 144)
-    signedDataBytes.set(ecdsaDerBytes, 144 + ecdsaCompactLen.length)
-    const signedDataHex = bytesToHex(signedDataBytes)
-
-    // 4. Send CBLSSignedData signature to backend
-    const response = await $fetch('/api/proposals', {
+    const res = await $fetch<{ success: boolean; error?: string }>('/api/proposals', {
       method: 'POST',
       body: {
         action: 'sign',
         proposalId: proposal.id,
-        txhash: selectedMn.txhash,
-        outidx: selectedMn.outidx,
-        pubkey: selectedMn.pubkey,
+        txhash: activeNode.txhash,
+        outidx: Number(activeNode.outidx),
+        pubkey: signerPubkey,
         signature: signedDataHex
       }
     })
 
-    if (response.success) {
-      toast.add({
-        title: 'İmza Başarılı',
-        description: 'Teklif başarıyla imzalandı.',
-        color: 'green'
-      })
-      signForm.value.wifKey = ''
-      await fetchProposals()
-    } else {
-      throw new Error(response.error)
+    if (!res?.success) {
+      throw new Error(res?.error || t('toastSignErrorTitle'))
     }
-  } catch (err) {
+
     toast.add({
-      title: 'İmza Hatası',
-      description: err.message || 'İmzalama işlemi başarısız.',
-      color: 'red'
+      title: t('toastSignSuccessTitle'),
+      description: t('toastSignSuccessDesc'),
+      color: 'success'
+    })
+
+    await refreshProposals()
+  } catch (err: unknown) {
+    const fetchErr = err as { data?: { statusMessage?: string; error?: string }; message?: string }
+    const errMsg =
+      fetchErr?.data?.error || fetchErr?.data?.statusMessage || fetchErr?.message || String(err)
+    toast.add({
+      title: t('toastSignErrorTitle'),
+      description: errMsg,
+      color: 'error'
     })
   } finally {
-    signingLoading.value = false
+    isSigning.value = false
   }
 }
-
-onMounted(() => {
-  fetchQuorum()
-  fetchProposals()
-})
 </script>
+
+<template>
+  <div class="space-y-8">
+    <!-- Hero Banner -->
+    <section
+      class="krista-card krista-hero-glow p-6 sm:p-8 border border-[var(--krista-border)] relative"
+    >
+      <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+        <div class="space-y-3 max-w-3xl">
+          <div class="flex flex-wrap items-center gap-2.5">
+            <span
+              class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-[#7695CD]/15 text-[#7695CD] border border-[#7695CD]/35"
+            >
+              <span class="w-2 h-2 rounded-full bg-[#7695CD] animate-pulse"></span>
+              {{ t('heroBadge') }}
+            </span>
+
+            <span
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-[#7695CD]/10 text-[#7695CD] border border-[#7695CD]/30"
+            >
+              Core {{ quorumData?.coreVersion || CORE_VERSION }} &bull; Proto {{ quorumData?.protocolVersion || PROTOCOL_VERSION }}
+            </span>
+
+            <span
+              v-if="quorumData?.chain"
+              class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-[#F5897C]/15 text-[#F5897C] border border-[#F5897C]/35"
+            >
+              {{ quorumData.chain.toUpperCase() }}
+            </span>
+
+            <span
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
+              :class="
+                quorumData?.success
+                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+              "
+            >
+              <span
+                class="w-1.5 h-1.5 rounded-full"
+                :class="quorumData?.success ? 'bg-emerald-400' : 'bg-amber-400'"
+              ></span>
+              {{ quorumData?.success ? t('networkConnected') : t('networkOffline') }}
+            </span>
+          </div>
+
+          <h1 class="text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight text-[var(--krista-text)]">
+            {{ t('heroTitle') }}
+          </h1>
+
+          <p class="text-sm sm:text-base text-[var(--krista-text-muted)] leading-relaxed">
+            {{ t('heroDescription') }}
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3 shrink-0">
+          <button
+            type="button"
+            :disabled="quorumLoading || proposalsLoading"
+            class="px-4 py-2.5 rounded-xl text-sm font-semibold border border-[var(--krista-border)] bg-[var(--krista-surface)] text-[var(--krista-text)] hover:border-[#7695CD] transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+            @click="refreshAll"
+          >
+            <svg
+              aria-hidden="true"
+              class="w-4 h-4 text-[#7695CD]"
+              :class="{ 'animate-spin': quorumLoading || proposalsLoading }"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            <span>{{ t('refreshBtn') }}</span>
+          </button>
+
+          <NuxtLink
+            to="/admin"
+            class="px-5 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-[#7695CD] to-[#F5897C] hover:opacity-95 shadow-md transition-all flex items-center gap-2"
+          >
+            <svg
+              aria-hidden="true"
+              class="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2.5"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            <span>{{ t('navCreateProposal') }}</span>
+          </NuxtLink>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4-Card Institutional KPI Strip -->
+    <section aria-label="Consensus Metrics" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <!-- KPI 1: Block Height H & Spend Block H+1 -->
+      <div class="krista-card p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+            {{ t('kpiCurrentBlock') }}
+          </span>
+          <span class="p-2 rounded-lg bg-[#7695CD]/15 text-[#7695CD]">
+            <svg
+              aria-hidden="true"
+              class="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
+              />
+            </svg>
+          </span>
+        </div>
+        <div class="mt-3 flex items-baseline gap-2">
+          <span class="text-2xl font-extrabold font-mono text-[var(--krista-text)]">
+            #{{ quorumData?.currentHeight ?? 0 }}
+          </span>
+          <span class="text-xs font-mono text-[#7695CD]">
+            &rarr; H+1: #{{ quorumData?.targetHeight ?? (quorumData?.currentHeight ?? 0) + 1 }}
+          </span>
+        </div>
+        <p class="mt-1 text-xs text-[var(--krista-text-muted)]">
+          {{ t('kpiTargetSpendBlock') }}
+        </p>
+      </div>
+
+      <!-- KPI 2: Active DKG & Majority Threshold -->
+      <div class="krista-card p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+            {{ t('kpiDkgEpoch') }}
+          </span>
+          <span class="p-2 rounded-lg bg-[#F5897C]/15 text-[#F5897C]">
+            <svg
+              aria-hidden="true"
+              class="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"
+              />
+            </svg>
+          </span>
+        </div>
+        <div class="mt-3 flex items-baseline gap-2">
+          <span class="text-2xl font-extrabold font-mono text-[#F5897C]">
+            {{ quorumThreshold }} / {{ quorumSize }}
+          </span>
+          <span class="text-xs font-mono text-[var(--krista-text-muted)]">
+            (DKG #{{ quorumData?.dkgHeight ?? 0 }})
+          </span>
+        </div>
+        <p class="mt-1 text-xs text-[var(--krista-text-muted)]">
+          {{ t('kpiMajorityRule') }}
+        </p>
+      </div>
+
+      <!-- KPI 3: Active Proposals & Volume -->
+      <div class="krista-card p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+            {{ t('kpiActiveProposals') }}
+          </span>
+          <span class="p-2 rounded-lg bg-[#7695CD]/15 text-[#7695CD]">
+            <svg
+              aria-hidden="true"
+              class="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+              />
+            </svg>
+          </span>
+        </div>
+        <div class="mt-3 flex items-baseline gap-2">
+          <span class="text-2xl font-extrabold font-mono text-[var(--krista-text)]">
+            {{ pendingProposalsCount }}
+          </span>
+          <span class="text-xs font-mono text-[#F5897C]">
+            {{ totalProposalVolume.toLocaleString() }} KRISTA
+          </span>
+        </div>
+        <p class="mt-1 text-xs text-[var(--krista-text-muted)]">
+          {{ t('kpiPendingVolume') }}
+        </p>
+      </div>
+
+      <!-- KPI 4: Zero-Custody Client-Side Security -->
+      <div class="krista-card p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+            {{ t('kpiZeroCustody') }}
+          </span>
+          <span class="p-2 rounded-lg bg-emerald-500/15 text-emerald-400">
+            <svg
+              aria-hidden="true"
+              class="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+              />
+            </svg>
+          </span>
+        </div>
+        <div class="mt-3 flex items-center gap-2">
+          <span class="text-lg font-extrabold text-emerald-400">
+            CBLSSignedData
+          </span>
+        </div>
+        <p class="mt-1 text-xs text-[var(--krista-text-muted)]">
+          {{ t('kpiZeroCustodyDesc') }}
+        </p>
+      </div>
+    </section>
+
+    <!-- Masternode Voter Verification & Local Key Readiness -->
+    <section
+      aria-labelledby="voter-verifier-heading"
+      class="krista-card p-6 border-l-4 border-l-[#7695CD]"
+    >
+      <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
+        <div class="space-y-1.5 lg:max-w-xl">
+          <div class="flex items-center gap-2">
+            <svg
+              aria-hidden="true"
+              class="w-5 h-5 text-[#F5897C]"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
+              />
+            </svg>
+            <h2 id="voter-verifier-heading" class="text-lg font-bold text-[var(--krista-text)]">
+              {{ t('voterVerifierTitle') }}
+            </h2>
+          </div>
+          <p class="text-xs sm:text-sm text-[var(--krista-text-muted)]">
+            {{ t('voterVerifierDesc') }}
+          </p>
+        </div>
+
+        <div class="flex-1 max-w-2xl w-full space-y-3">
+          <div class="krista-field-group p-3 rounded-xl border border-[var(--krista-border)] bg-[var(--krista-surface)]">
+            <label
+              for="verifier-wif-input"
+              class="block text-xs font-bold uppercase tracking-wider text-[var(--krista-text)] mb-1"
+            >
+              {{ t('wifInputLabel') }}
+            </label>
+            <!-- Format hint placed ABOVE the input so autocomplete popovers never cover it -->
+            <p id="verifier-wif-hint" class="text-xs text-[var(--krista-text-muted)] mb-2">
+              {{ t('wifInputHint') }}
+            </p>
+
+            <div class="flex items-center gap-2">
+              <input
+                id="verifier-wif-input"
+                v-model="wifKey"
+                :type="showWif ? 'text' : 'password'"
+                autocomplete="off"
+                spellcheck="false"
+                :placeholder="t('wifInputPlaceholder')"
+                aria-describedby="verifier-wif-hint verifier-wif-error"
+                :aria-invalid="wifHasError ? 'true' : undefined"
+                class="krista-input flex-1 px-3.5 py-2 rounded-lg text-sm font-mono bg-[var(--krista-bg-elevated)] text-[var(--krista-text)] border border-[var(--krista-border)] focus:outline-none"
+                @input="onWifInput"
+                @blur="onWifBlur"
+              />
+
+              <button
+                type="button"
+                :aria-label="showWif ? t('wifHidePassword') : t('wifShowPassword')"
+                :title="showWif ? t('wifHidePassword') : t('wifShowPassword')"
+                class="px-3 py-2 rounded-lg border border-[var(--krista-border)] bg-[var(--krista-bg-elevated)] text-xs font-semibold text-[var(--krista-text-muted)] hover:text-[var(--krista-text)] cursor-pointer"
+                @click="showWif = !showWif"
+              >
+                {{ showWif ? '🙈' : '👁️' }}
+              </button>
+
+              <button
+                v-if="wifKey"
+                type="button"
+                class="px-3 py-2 rounded-lg border border-[var(--krista-border)] bg-[var(--krista-bg-elevated)] text-xs font-semibold text-[#F5897C] hover:bg-[#F5897C]/10 cursor-pointer"
+                @click="clearWifKey"
+              >
+                {{ t('wifClearBtn') }}
+              </button>
+            </div>
+
+            <!-- Accessible Error Announcement -->
+            <p
+              v-if="wifHasError"
+              id="verifier-wif-error"
+              role="alert"
+              class="mt-2 text-xs font-semibold text-red-400"
+            >
+              {{ t('quorumInvalidWifTitle') }}: {{ t('quorumInvalidWifDesc') }}
+            </p>
+          </div>
+
+          <!-- Instant Quorum Match Status Banner -->
+          <div
+            v-if="derivedWallet && matchedQuorumMember"
+            role="status"
+            class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/35 flex items-start gap-3"
+          >
+            <span class="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 shrink-0 mt-0.5">
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </span>
+            <div class="text-xs space-y-1">
+              <p class="font-bold text-emerald-400">
+                {{ t('quorumMatchedTitle') }} ({{ matchedQuorumMember.ip || matchedQuorumMember.addr || 'On-Chain MN' }})
+              </p>
+              <p class="text-[var(--krista-text-muted)]">
+                {{ t('quorumMatchedDesc') }}
+              </p>
+            </div>
+          </div>
+
+          <div
+            v-else-if="derivedWallet && !matchedQuorumMember"
+            role="status"
+            class="p-3.5 rounded-xl bg-[#F5897C]/10 border border-[#F5897C]/35 flex items-start gap-3"
+          >
+            <span class="p-1.5 rounded-lg bg-[#F5897C]/20 text-[#F5897C] shrink-0 mt-0.5">
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+            </span>
+            <div class="text-xs space-y-1">
+              <p class="font-bold text-[#F5897C]">
+                {{ t('quorumNotMatchedTitle') }}
+              </p>
+              <p class="text-[var(--krista-text-muted)]">
+                {{ t('quorumNotMatchedDesc') }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Network Telemetry + Active Quorum Members Table -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <!-- Left 4 Columns: Network & Consensus Telemetry -->
+      <section class="lg:col-span-4 krista-card p-6 space-y-5">
+        <div class="flex items-center justify-between border-b border-[var(--krista-border)] pb-3">
+          <h2 class="text-base font-bold text-[var(--krista-text)] flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-[#7695CD]"></span>
+            {{ t('networkStatusTitle') }}
+          </h2>
+          <span
+            v-if="quorumData?.chain"
+            class="text-[11px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-[#7695CD]/15 text-[#7695CD]"
+          >
+            {{ quorumData.chain }}
+          </span>
+        </div>
+
+        <dl class="space-y-3 text-sm">
+          <div class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60">
+            <dt class="text-[var(--krista-text-muted)]">{{ t('currentBlockHeight') }}</dt>
+            <dd class="font-mono font-bold text-[var(--krista-text)]">
+              #{{ quorumData?.currentHeight ?? 0 }}
+            </dd>
+          </div>
+
+          <div class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60">
+            <dt class="text-[var(--krista-text-muted)]">{{ t('targetSpendHeight') }}</dt>
+            <dd class="font-mono font-bold text-[#7695CD]">
+              #{{ quorumData?.targetHeight ?? (quorumData?.currentHeight ?? 0) + 1 }}
+            </dd>
+          </div>
+
+          <div class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60">
+            <dt class="text-[var(--krista-text-muted)]">{{ t('activeDkgHeight') }}</dt>
+            <dd class="font-mono font-bold text-[#F5897C]">
+              #{{ quorumData?.dkgHeight ?? 0 }}
+            </dd>
+          </div>
+
+          <div class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60">
+            <dt class="text-[var(--krista-text-muted)]">{{ t('activeSeedHeight') }}</dt>
+            <dd class="font-mono font-semibold text-[var(--krista-text)]">
+              #{{ quorumData?.seedHeight ?? 0 }}
+            </dd>
+          </div>
+
+          <div
+            v-if="quorumData?.treasuryGovernanceStartHeight"
+            class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60"
+          >
+            <dt class="text-[var(--krista-text-muted)]">{{ t('governanceStartHeight') }}</dt>
+            <dd class="font-mono font-semibold text-emerald-400">
+              #{{ quorumData.treasuryGovernanceStartHeight }}
+            </dd>
+          </div>
+
+          <div class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60">
+            <dt class="text-[var(--krista-text-muted)]">{{ t('liveMasternodesLabel') }}</dt>
+            <dd
+              class="font-mono font-bold"
+              :class="
+                (quorumData?.activeMasternodeCount ?? quorumMembers.length) > 0
+                  ? 'text-emerald-400'
+                  : 'text-amber-400'
+              "
+            >
+              {{ quorumData?.activeMasternodeCount ?? quorumMembers.length }}
+            </dd>
+          </div>
+        </dl>
+
+        <!-- Developer Fund Address -->
+        <div v-if="quorumData?.developerFundAddress" class="space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+              {{ t('devFundAddressLabel') }}
+            </span>
+            <button
+              type="button"
+              class="text-xs font-semibold text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+              @click="copyText(quorumData.developerFundAddress)"
+            >
+              {{ t('copyBtn') }}
+            </button>
+          </div>
+          <div
+            class="p-2.5 rounded-lg bg-[var(--krista-surface)] border border-[var(--krista-border)] font-mono text-xs text-[#F5897C] break-all"
+          >
+            {{ quorumData.developerFundAddress }}
+          </div>
+        </div>
+
+        <!-- Deterministic Quorum Seed -->
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+              {{ t('activeQuorumSeed') }}
+            </span>
+            <button
+              v-if="quorumData?.seed"
+              type="button"
+              class="text-xs font-semibold text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+              @click="copyText(quorumData.seed)"
+            >
+              {{ t('copyBtn') }}
+            </button>
+          </div>
+          <div
+            class="p-2.5 rounded-lg bg-[var(--krista-surface)] border border-[var(--krista-border)] font-mono text-[11px] text-[var(--krista-text-muted)] break-all"
+          >
+            {{ quorumData?.seed || '0000000000000000000000000000000000000000000000000000000000000000' }}
+          </div>
+        </div>
+      </section>
+
+      <!-- Right 8 Columns: Active Quorum Members Table -->
+      <section class="lg:col-span-8 krista-card p-6 flex flex-col justify-between">
+        <div>
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-[var(--krista-border)] pb-3 mb-4">
+            <div>
+              <h2 class="text-base font-bold text-[var(--krista-text)]">
+                {{ t('quorumMembersTitle') }}
+              </h2>
+              <p class="text-xs text-[var(--krista-text-muted)]">
+                {{ t('quorumMembersSubtitle') }}
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              <span
+                class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-mono font-semibold bg-[#F5897C]/15 text-[#F5897C] border border-[#F5897C]/30"
+              >
+                {{ t('quorumScalingNote') }}
+              </span>
+              <span
+                class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold border"
+                :class="
+                  quorumMembers.length > 0
+                    ? 'bg-[#7695CD]/15 text-[#7695CD] border-[#7695CD]/30'
+                    : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                "
+              >
+                {{ quorumMembers.length }} / {{ quorumSize }} Masternode
+              </span>
+            </div>
+          </div>
+
+          <div v-if="quorumMembers.length > 0" class="overflow-x-auto custom-scroll">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="border-b border-[var(--krista-border)] text-[11px] font-bold uppercase tracking-wider text-[var(--krista-text-muted)]">
+                  <th scope="col" class="py-2.5 px-3">{{ t('colRank') }}</th>
+                  <th scope="col" class="py-2.5 px-3">{{ t('colIpAddress') }}</th>
+                  <th scope="col" class="py-2.5 px-3">{{ t('colCollateral') }}</th>
+                  <th scope="col" class="py-2.5 px-3">{{ t('colPubKey') }}</th>
+                  <th scope="col" class="py-2.5 px-3 text-right">{{ t('colRole') }}</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-[var(--krista-border)]/60 text-xs">
+                <tr
+                  v-for="(node, idx) in quorumMembers"
+                  :key="getMemberKey(node)"
+                  class="transition-colors"
+                  :class="
+                    matchedQuorumMember && getMemberKey(matchedQuorumMember) === getMemberKey(node)
+                      ? 'bg-emerald-500/10'
+                      : 'hover:bg-[#7695CD]/5'
+                  "
+                >
+                  <td class="py-3 px-3 font-mono font-bold text-[#7695CD]">
+                    #{{ node.rank ?? idx + 1 }}
+                  </td>
+                  <td class="py-3 px-3 font-mono font-semibold text-[var(--krista-text)]">
+                    {{ node.ip || node.addr || 'On-Chain MN' }}
+                  </td>
+                  <td class="py-3 px-3 font-mono text-[var(--krista-text-muted)]">
+                    <div class="flex items-center gap-1.5">
+                      <span>{{ node.txhash.slice(0, 12) }}...{{ node.txhash.slice(-6) }}:{{ node.outidx }}</span>
+                      <button
+                        type="button"
+                        :title="t('copyBtn')"
+                        class="text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+                        @click="copyText(`${node.txhash}:${node.outidx}`)"
+                      >
+                        ⧉
+                      </button>
+                    </div>
+                  </td>
+                  <td class="py-3 px-3 font-mono text-[var(--krista-text-muted)]">
+                    <div v-if="node.pubkey" class="flex items-center gap-1.5">
+                      <span>{{ node.pubkey.slice(0, 10) }}...{{ node.pubkey.slice(-6) }}</span>
+                      <button
+                        type="button"
+                        :title="t('copyBtn')"
+                        class="text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+                        @click="copyText(node.pubkey)"
+                      >
+                        ⧉
+                      </button>
+                    </div>
+                    <span v-else>-</span>
+                  </td>
+                  <td class="py-3 px-3 text-right">
+                    <div class="inline-flex items-center justify-end gap-1.5">
+                      <span
+                        v-if="node.dip3 || node.operatorPubKey"
+                        class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#F5897C]/15 text-[#F5897C] border border-[#F5897C]/30"
+                      >
+                        KTDIP3
+                      </span>
+                      <span
+                        v-if="matchedQuorumMember && getMemberKey(matchedQuorumMember) === getMemberKey(node)"
+                        class="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
+                      >
+                        {{ t('badgeYourNode') }}
+                      </span>
+                      <span
+                        v-else
+                        class="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#7695CD]/15 text-[#7695CD] border border-[#7695CD]/30"
+                      >
+                        {{ t('badgeVoter') }}
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div
+            v-else
+            role="status"
+            class="my-4 p-8 rounded-2xl border border-dashed border-[var(--krista-border)] bg-[var(--krista-surface)]/70 flex flex-col items-center justify-center text-center space-y-3"
+          >
+            <div class="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <svg
+                aria-hidden="true"
+                class="w-6 h-6"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
+                />
+              </svg>
+            </div>
+            <h3 class="text-base font-bold text-[var(--krista-text)]">
+              {{ t('noActiveMasternodesTitle') }}
+            </h3>
+            <p class="text-xs sm:text-sm text-[var(--krista-text-muted)] max-w-xl leading-relaxed">
+              {{ t('noActiveMasternodesDesc') }}
+            </p>
+            <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--krista-bg-elevated)] border border-[var(--krista-border)] font-mono text-xs text-[var(--krista-text-muted)]">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span>
+                RPC #{{ quorumData?.currentHeight ?? 0 }} &bull; listmasternodes: {{ quorumData?.activeMasternodeCount ?? 0 }} ENABLED
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Treasury Spending Proposals & Voting Section -->
+    <section aria-labelledby="proposals-heading" class="space-y-5">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <h2 id="proposals-heading" class="text-xl font-extrabold text-[var(--krista-text)] flex items-center gap-2.5">
+          <span class="w-3 h-3 rounded-sm bg-gradient-to-br from-[#7695CD] to-[#F5897C]"></span>
+          {{ t('proposalsSectionTitle') }}
+        </h2>
+
+        <!-- Filter Tabs & Search -->
+        <div class="flex flex-wrap items-center gap-3">
+          <div
+            role="group"
+            aria-label="Proposal Status Filter"
+            class="inline-flex rounded-xl p-1 bg-[var(--krista-surface)] border border-[var(--krista-border)]"
+          >
+            <button
+              v-for="tab in (['all', 'pending', 'broadcasted', 'failed'] as const)"
+              :key="tab"
+              type="button"
+              class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+              :class="
+                statusFilter === tab
+                  ? 'bg-[#7695CD] text-white shadow-xs'
+                  : 'text-[var(--krista-text-muted)] hover:text-[var(--krista-text)]'
+              "
+              @click="statusFilter = tab"
+            >
+              {{
+                tab === 'all'
+                  ? t('filterAll')
+                  : tab === 'pending'
+                    ? t('filterPending')
+                    : tab === 'broadcasted'
+                      ? t('filterBroadcasted')
+                      : t('filterFailed')
+              }}
+            </button>
+          </div>
+
+          <input
+            v-model="searchQuery"
+            type="search"
+            :placeholder="t('searchPlaceholder')"
+            :aria-label="t('searchPlaceholder')"
+            class="px-3.5 py-2 rounded-xl text-xs bg-[var(--krista-surface)] text-[var(--krista-text)] border border-[var(--krista-border)] focus:outline-none focus:border-[#7695CD] min-w-[230px]"
+          />
+        </div>
+      </div>
+
+      <!-- Empty State -->
+      <div
+        v-if="filteredProposals.length === 0"
+        class="krista-card p-12 text-center space-y-4"
+      >
+        <div
+          class="w-14 h-14 mx-auto rounded-2xl bg-[#7695CD]/15 border border-[#7695CD]/30 flex items-center justify-center text-[#7695CD]"
+        >
+          <svg
+            aria-hidden="true"
+            class="w-7 h-7"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            stroke-width="1.8"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"
+            />
+          </svg>
+        </div>
+        <h3 class="text-lg font-bold text-[var(--krista-text)]">
+          {{ t('noProposalsTitle') }}
+        </h3>
+        <p class="text-sm text-[var(--krista-text-muted)] max-w-md mx-auto">
+          {{ t('noProposalsDesc') }}
+        </p>
+        <div class="pt-2">
+          <NuxtLink
+            to="/admin"
+            class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[#7695CD] to-[#F5897C] shadow-sm"
+          >
+            + {{ t('navCreateProposal') }}
+          </NuxtLink>
+        </div>
+      </div>
+
+      <!-- Proposal Cards Grid -->
+      <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <article
+          v-for="proposal in filteredProposals"
+          :key="proposal.id"
+          class="krista-card p-6 flex flex-col justify-between space-y-5"
+        >
+          <div class="space-y-4">
+            <!-- Header Row: Status Badge + Amount -->
+            <div class="flex items-start justify-between gap-4 border-b border-[var(--krista-border)] pb-4">
+              <div class="space-y-1">
+                <div class="flex items-center gap-2">
+                  <span
+                    class="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider"
+                    :class="
+                      proposal.status === 'broadcasted'
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/35'
+                        : proposal.status === 'failed'
+                          ? 'bg-red-500/20 text-red-400 border border-red-500/35'
+                          : 'bg-[#7695CD]/20 text-[#7695CD] border border-[#7695CD]/35'
+                    "
+                  >
+                    {{
+                      proposal.status === 'broadcasted'
+                        ? t('statusBroadcasted')
+                        : proposal.status === 'failed'
+                          ? t('statusFailed')
+                          : t('statusPending')
+                    }}
+                  </span>
+                  <span class="text-xs font-semibold text-[var(--krista-text-muted)]">
+                    {{ t('proposalCardBadge') }}
+                  </span>
+                </div>
+                <p class="text-xs text-[var(--krista-text-muted)] font-mono">
+                  {{ new Date(proposal.createdAt).toLocaleString() }}
+                </p>
+              </div>
+
+              <div class="text-right">
+                <span class="text-2xl font-extrabold font-mono text-[#F5897C]">
+                  {{ proposal.amount }}
+                </span>
+                <span class="text-xs font-bold text-[#7695CD] ml-1">KRISTA</span>
+              </div>
+            </div>
+
+            <!-- Recipient Address & Proposal txHash -->
+            <div class="space-y-2.5 text-xs">
+              <div class="p-3 rounded-xl bg-[var(--krista-surface)] border border-[var(--krista-border)] space-y-1">
+                <div class="flex items-center justify-between text-[var(--krista-text-muted)]">
+                  <span class="font-semibold">{{ t('recipientAddress') }}</span>
+                  <button
+                    type="button"
+                    class="text-[#7695CD] hover:text-[#F5897C] font-semibold cursor-pointer"
+                    @click="copyText(proposal.targetAddress)"
+                  >
+                    {{ t('copyBtn') }}
+                  </button>
+                </div>
+                <p class="font-mono font-bold text-[var(--krista-text)] break-all">
+                  {{ proposal.targetAddress }}
+                </p>
+              </div>
+
+              <div class="p-3 rounded-xl bg-[var(--krista-surface)] border border-[var(--krista-border)] space-y-1">
+                <div class="flex items-center justify-between text-[var(--krista-text-muted)]">
+                  <span class="font-semibold">{{ t('proposalTxHash') }}</span>
+                  <button
+                    type="button"
+                    class="text-[#7695CD] hover:text-[#F5897C] font-semibold cursor-pointer"
+                    @click="copyText(proposal.txHash)"
+                  >
+                    {{ t('copyBtn') }}
+                  </button>
+                </div>
+                <p class="font-mono text-[11px] text-[#7695CD] break-all">
+                  {{ proposal.txHash }}
+                </p>
+              </div>
+            </div>
+
+            <!-- Quorum Signature Progress Bar -->
+            <div class="space-y-2">
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-bold text-[var(--krista-text)]">
+                  {{ t('collectedSignatures') }}
+                </span>
+                <span class="font-mono font-bold text-[#F5897C]">
+                  {{ proposal.signatures?.length || 0 }} / {{ quorumThreshold }}
+                </span>
+              </div>
+              <progress
+                class="krista-progress"
+                :value="proposal.signatures?.length || 0"
+                :max="quorumThreshold"
+              ></progress>
+
+              <!-- Signed Nodes Badges -->
+              <div v-if="proposal.signatures?.length" class="pt-1 space-y-1">
+                <span class="text-[11px] text-[var(--krista-text-muted)]">
+                  {{ t('signedNodesLabel') }}
+                </span>
+                <div class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="sig in proposal.signatures"
+                    :key="`${sig.txhash}:${sig.outidx}`"
+                    class="px-2 py-0.5 rounded-md text-[11px] font-mono bg-[#7695CD]/15 text-[#7695CD] border border-[#7695CD]/30"
+                  >
+                    ✓ {{ sig.txhash.slice(0, 10) }}...:{{ sig.outidx }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Expandable Raw Transaction Hex Inspector -->
+            <details class="group rounded-xl border border-[var(--krista-border)] bg-[var(--krista-surface)] p-3 text-xs">
+              <summary class="font-semibold text-[var(--krista-text-muted)] hover:text-[var(--krista-text)] cursor-pointer select-none flex items-center justify-between">
+                <span>{{ t('inspectRawTx') }}</span>
+                <span class="text-[#7695CD] font-mono text-[11px]">
+                  {{ Math.floor((proposal.rawTxHex?.length || 0) / 2) }} bytes
+                </span>
+              </summary>
+              <div class="mt-2.5 space-y-2">
+                <div class="terminal-block p-2.5 rounded-lg font-mono text-[11px] break-all max-h-32 overflow-y-auto custom-scroll">
+                  {{ proposal.rawTxHex }}
+                </div>
+                <button
+                  type="button"
+                  class="text-xs font-semibold text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+                  @click="copyText(proposal.rawTxHex)"
+                >
+                  {{ t('copyBtn') }} Raw Hex
+                </button>
+              </div>
+            </details>
+          </div>
+
+          <!-- Action / Broadcast Status Footer -->
+          <div class="pt-3 border-t border-[var(--krista-border)]">
+            <!-- Broadcasted Banner -->
+            <div
+              v-if="proposal.status === 'broadcasted'"
+              class="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/35 space-y-1"
+            >
+              <p class="text-xs font-bold text-emerald-400">
+                ✓ {{ t('txBroadcastedTitle') }}
+              </p>
+              <div class="flex items-center justify-between gap-2">
+                <p class="text-[11px] font-mono text-[var(--krista-text-muted)] break-all">
+                  TXID: {{ proposal.finalTxid || proposal.broadcastTxId }}
+                </p>
+                <button
+                  v-if="proposal.finalTxid || proposal.broadcastTxId"
+                  type="button"
+                  class="text-xs font-semibold text-emerald-400 hover:underline shrink-0 cursor-pointer"
+                  @click="copyText(proposal.finalTxid || proposal.broadcastTxId || '')"
+                >
+                  {{ t('copyBtn') }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Voting / Signing Controls -->
+            <div v-else class="space-y-3">
+              <div
+                v-if="proposal.error || proposal.broadcastError"
+                role="alert"
+                class="p-3 rounded-xl bg-red-500/10 border border-red-500/35 text-xs text-red-400 space-y-1"
+              >
+                <p class="font-bold">{{ t('broadcastErrorTitle') }}:</p>
+                <p class="font-mono text-[11px] break-all">{{ proposal.error || proposal.broadcastError }}</p>
+              </div>
+
+              <div class="space-y-1.5">
+                <label
+                  :for="`select-mn-${proposal.id}`"
+                  class="block text-xs font-bold text-[var(--krista-text)]"
+                >
+                  {{ t('selectMasternodeLabel') }}
+                </label>
+                <select
+                  :id="`select-mn-${proposal.id}`"
+                  v-model="selectedNode"
+                  class="w-full px-3 py-2 rounded-xl text-xs font-mono bg-[var(--krista-surface)] text-[var(--krista-text)] border border-[var(--krista-border)] focus:outline-none focus:border-[#7695CD]"
+                >
+                  <option value="">{{ t('selectMasternodePlaceholder') }}</option>
+                  <option
+                    v-for="(node, nIdx) in quorumMembers"
+                    :key="getMemberKey(node)"
+                    :value="getMemberKey(node)"
+                  >
+                    #{{ node.rank ?? nIdx + 1 }} — {{ node.ip || node.addr || 'On-Chain MN' }} ({{ node.txhash.slice(0, 12) }}...:{{ node.outidx }})
+                  </option>
+                </select>
+              </div>
+
+              <div class="space-y-1.5">
+                <label
+                  :for="`wif-proposal-${proposal.id}`"
+                  class="block text-xs font-bold text-[var(--krista-text)]"
+                >
+                  {{ t('wifInputLabel') }}
+                </label>
+                <input
+                  :id="`wif-proposal-${proposal.id}`"
+                  v-model="wifKey"
+                  :type="showWif ? 'text' : 'password'"
+                  autocomplete="off"
+                  spellcheck="false"
+                  :placeholder="t('wifInputPlaceholder')"
+                  class="krista-input w-full px-3 py-2 rounded-xl text-xs font-mono bg-[var(--krista-surface)] text-[var(--krista-text)] border border-[var(--krista-border)] focus:outline-none"
+                  @input="onWifInput"
+                  @blur="onWifBlur"
+                />
+              </div>
+
+              <p
+                v-if="selectedNode && hasNodeSigned(proposal, selectedNode)"
+                class="text-xs font-semibold text-emerald-400"
+              >
+                ✓ {{ t('alreadySignedByYou') }}
+              </p>
+
+              <button
+                type="button"
+                :disabled="
+                  isSigning ||
+                  (Boolean(selectedNode) && hasNodeSigned(proposal, selectedNode))
+                "
+                class="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-[#7695CD] to-[#F5897C] hover:opacity-95 shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                @click="signProposal(proposal)"
+              >
+                {{ t('signAndVoteBtn') }}
+              </button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- CBLSSignedData & H+1 Quorum Security Architecture Guide -->
+    <section
+      aria-labelledby="arch-guide-heading"
+      class="krista-card p-6 sm:p-8 space-y-6 border-t-4 border-t-[#F5897C]"
+    >
+      <div class="flex items-center gap-3">
+        <img
+          src="/logo.svg"
+          alt="KristaTech"
+          width="28"
+          height="28"
+          class="w-7 h-7 object-contain"
+        />
+        <h2 id="arch-guide-heading" class="text-lg sm:text-xl font-extrabold text-[var(--krista-text)]">
+          {{ t('archModalTitle') }}
+        </h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+        <div class="p-4 rounded-xl bg-[var(--krista-surface)] border border-[var(--krista-border)] space-y-2">
+          <h3 class="text-sm font-bold text-[#7695CD]">
+            {{ t('archPoint1Title') }}
+          </h3>
+          <p class="text-xs text-[var(--krista-text-muted)] leading-relaxed">
+            {{ t('archPoint1Desc') }}
+          </p>
+        </div>
+
+        <div class="p-4 rounded-xl bg-[var(--krista-surface)] border border-[var(--krista-border)] space-y-2">
+          <h3 class="text-sm font-bold text-[#F5897C]">
+            {{ t('archPoint2Title') }}
+          </h3>
+          <p class="text-xs text-[var(--krista-text-muted)] leading-relaxed">
+            {{ t('archPoint2Desc') }}
+          </p>
+        </div>
+
+        <div class="p-4 rounded-xl bg-[var(--krista-surface)] border border-[var(--krista-border)] space-y-2">
+          <h3 class="text-sm font-bold text-emerald-400">
+            {{ t('archPoint3Title') }}
+          </h3>
+          <p class="text-xs text-[var(--krista-text-muted)] leading-relaxed">
+            {{ t('archPoint3Desc') }}
+          </p>
+        </div>
+      </div>
+    </section>
+  </div>
+</template>

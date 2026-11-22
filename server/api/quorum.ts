@@ -1,68 +1,54 @@
-import crypto from 'crypto'
+import crypto from 'node:crypto'
+import { defineEventHandler, setResponseStatus } from 'h3'
+import {
+  callKristaRpc,
+  checkApiRateLimit,
+  resolveClientIp,
+  sanitizeRpcErrorMessage
+} from '../utils/security'
+import {
+  CHAIN_DEFAULTS,
+  CORE_VERSION,
+  PROTOCOL_VERSION,
+  getQuorumMajorityThreshold,
+  getTargetQuorumSize,
+  maskIpAddress,
+  writeCompactSizeBytes
+} from '../utils/treasuryCrypto'
 
-const RPC_URL = process.env.NUXT_RPC_URL || 'http://127.0.0.1:27998'
-const RPC_AUTH = Buffer.from(`${process.env.NUXT_RPC_USER || 'kristarpc'}:${process.env.NUXT_RPC_PASSWORD || 'kristapassword'}`).toString('base64')
-
-async function callRpc(method: string, params: any[] = []) {
-  const response = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Basic ${RPC_AUTH}`
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 'nuxt-api',
-      method,
-      params
-    })
-  })
-  if (!response.ok) {
-    throw new Error(`RPC call ${method} failed: ${response.statusText}`)
-  }
-  const json: any = await response.json()
-  return json.result
-}
-
-function writeCompactSize(size: number): Buffer {
-  if (size < 253) {
-    return Buffer.from([size])
-  } else if (size <= 0xffff) {
-    const buf = Buffer.alloc(3)
-    buf.writeUInt8(253, 0)
-    buf.writeUInt16LE(size, 1)
-    return buf
-  } else if (size <= 0xffffffff) {
-    const buf = Buffer.alloc(5)
-    buf.writeUInt8(254, 0)
-    buf.writeUInt32LE(size, 1)
-    return buf
-  } else {
-    const buf = Buffer.alloc(9)
-    buf.writeUInt8(255, 0)
-    buf.writeBigUInt64LE(BigInt(size), 1)
-    return buf
-  }
-}
+const callRpc = callKristaRpc
 
 function doubleSha256(buf: Buffer): Buffer {
   const h1 = crypto.createHash('sha256').update(buf).digest()
   return crypto.createHash('sha256').update(h1).digest()
 }
 
-// Global cache for seeds: height (number) -> seed (Buffer)
+// Bounded cache for seeds: height (number) -> seed (Buffer)
+const MAX_SEED_CACHE_ENTRIES = 2000
 const seedCache = new Map<number, Buffer>()
 
+function setSeedCacheBounded(height: number, seed: Buffer) {
+  if (seedCache.size >= MAX_SEED_CACHE_ENTRIES && !seedCache.has(height)) {
+    const oldestKey = seedCache.keys().next().value
+    if (oldestKey !== undefined && oldestKey !== 199) {
+      seedCache.delete(oldestKey)
+    }
+  }
+  seedCache.set(height, seed)
+}
+
 async function getAdamSeed(height: number): Promise<Buffer> {
+  const safeHeight = Math.max(0, Math.floor(height))
+
   // If height < 200, ADAM is not active, return the block hash of that height as seed
-  if (height < 200) {
-    const blockHash = await callRpc('getblockhash', [height])
+  if (safeHeight < 200) {
+    const blockHash = await callRpc('getblockhash', [safeHeight])
     return Buffer.from(blockHash, 'hex').reverse()
   }
 
   // Check if seed is already cached
-  if (seedCache.has(height)) {
-    return seedCache.get(height)!
+  if (seedCache.has(safeHeight)) {
+    return seedCache.get(safeHeight)!
   }
 
   // Find the highest cached height less than target height
@@ -73,10 +59,10 @@ async function getAdamSeed(height: number): Promise<Buffer> {
   if (!seedCache.has(199)) {
     const blockHash199 = await callRpc('getblockhash', [199])
     const seed199 = Buffer.from(blockHash199, 'hex').reverse()
-    seedCache.set(199, seed199)
+    setSeedCacheBounded(199, seed199)
   }
 
-  for (let h = height; h >= 199; h--) {
+  for (let h = safeHeight; h >= 199; h--) {
     if (seedCache.has(h)) {
       startHeight = h
       currentSeed = seedCache.get(h)!
@@ -84,8 +70,8 @@ async function getAdamSeed(height: number): Promise<Buffer> {
     }
   }
 
-  // Recursively calculate up to target height
-  for (let h = startHeight + 1; h <= height; h++) {
+  // Calculate up to target height
+  for (let h = startHeight + 1; h <= safeHeight; h++) {
     const blockHash = await callRpc('getblockhash', [h])
     const block = await callRpc('getblock', [blockHash])
     const vrfProofHex = block.vAdamVRFProof || ''
@@ -94,162 +80,233 @@ async function getAdamSeed(height: number): Promise<Buffer> {
     // Match ComputeNextAdamSeed in src/adam.cpp:
     // If vAdamVRFProof contains a valid CBLSSignedData (>= 144 bytes: 48B blsPubKey + 96B blsSig),
     // hash currentSeed + raw 144 bytes without CompactSize or trailing ECDSA auth signature.
-    const dataToHash = vrfProofBytes.length >= 144
-      ? Buffer.concat([currentSeed, vrfProofBytes.subarray(0, 144)])
-      : Buffer.concat([currentSeed, writeCompactSize(vrfProofBytes.length), vrfProofBytes])
+    const dataToHash =
+      vrfProofBytes.length >= 144
+        ? Buffer.concat([currentSeed, vrfProofBytes.subarray(0, 144)])
+        : Buffer.concat([
+            currentSeed,
+            Buffer.from(writeCompactSizeBytes(vrfProofBytes.length)),
+            vrfProofBytes
+          ])
     currentSeed = doubleSha256(dataToHash)
-    seedCache.set(h, currentSeed)
+    setSeedCacheBounded(h, currentSeed)
   }
 
   return currentSeed
 }
 
-function maskIpAddress(ip: string | undefined): string {
-  if (!ip) return 'On-Chain MN'
-  if (ip === 'On-Chain MN' || ip.startsWith('ADAM-Miner')) return ip
-  const parts = ip.split(':')
-  const ipPart = parts[0] || ''
-  const portPart = parts[1] ? `:${parts[1]}` : ''
-
-  if (ipPart.includes('.')) {
-    const octets = ipPart.split('.')
-    if (octets.length === 4) {
-      return `${octets[0]}.xxx.xxx.${octets[3]}${portPart}`
-    }
-    return `xxx.xxx.xxx.xxx${portPart}`
-  }
-  return `[xxxx:xxxx:xxxx::xxxx]${portPart}`
-}
-
 export default defineEventHandler(async (event) => {
-  try {
-    const blockChainInfo = await callRpc('getblockchaininfo')
-    const currentHeight = blockChainInfo.blocks
-    const targetHeight = currentHeight + 1 // CheckInputs & ConnectBlock verify at nSpendHeight = H + 1
-    const chain = blockChainInfo.chain
+  const clientIp = resolveClientIp(event)
+  const rateCheck = checkApiRateLimit('quorum-get', clientIp, 60, 60_000)
+  if (!rateCheck.allowed) {
+    setResponseStatus(event, 429)
+    return {
+      success: false,
+      error: `Rate limit exceeded. Try again in ${rateCheck.retryAfterSec}s.`
+    }
+  }
 
-    // Prefer consensus-direct getactivequorum RPC from kristatechd at targetHeight = currentHeight + 1 (SEC-12 compliant)
+  try {
+    // Query live blockchain state and live registered Masternode list directly from kristatechd
+    const [blockChainInfo, rawMns] = await Promise.all([
+      callRpc('getblockchaininfo'),
+      callRpc('listmasternodes')
+    ])
+
+    const currentHeight = Number(blockChainInfo.blocks)
+    const targetHeight = currentHeight + 1 // CheckInputs & ConnectBlock verify at nSpendHeight = H + 1
+    const chain = String(blockChainInfo.chain || 'main')
+    const defaults = CHAIN_DEFAULTS[chain] || CHAIN_DEFAULTS.main!
+
+    // Filter live on-chain Masternodes from listmasternodes (never fabricate synthetic MNs from PoW miners)
+    const allMns = Array.isArray(rawMns) ? rawMns : []
+    const enabledMns = allMns.filter(
+      (mn: any) => mn.status === 'ENABLED' || mn.status === 'ACTIVE'
+    )
+
+    const liveMnByOutpoint = new Map<string, any>()
+    for (const mn of enabledMns) {
+      const key = `${String(mn.txhash || '').toLowerCase()}:${Number(mn.outidx)}`
+      liveMnByOutpoint.set(key, mn)
+    }
+
+    // Dynamic LLMQ Quorum Scaling (5 -> 9 -> 11 -> 15 in src/llmq.cpp:GetTargetQuorumSize)
+    const targetQuorumSize = getTargetQuorumSize(enabledMns.length)
+
+    // Compute live DKG height & Seed height from actual mined blocks on the chain
+    let fRotationActive = false
+    if (chain === 'main') {
+      fRotationActive = targetHeight >= 1400
+    } else if (chain === 'test') {
+      fRotationActive = targetHeight >= 1000
+    } else {
+      fRotationActive = targetHeight >= 800
+    }
+
+    const dkgInterval = chain === 'regtest' || chain === 'test' ? 10 : 100
+    const epochHeight = Math.floor(targetHeight / dkgInterval) * dkgInterval
+    let dkgHeight = fRotationActive ? targetHeight : epochHeight
+    let seedHeight = Math.min(currentHeight, Math.max(0, epochHeight - 1))
+
+    const seedBuffer = await getAdamSeed(seedHeight)
+    let seedHex = Buffer.from(seedBuffer).reverse().toString('hex')
+
+    let developerFundAddress = defaults.devFundAddr
+    let sporkPubKey = defaults.sporkPubKey
+    let quorumHash: string | undefined
+
+    // Optionally enrich metadata from getactivequorum while strictly verifying members against live listmasternodes
+    let activeQuorum: any = null
     try {
-      const activeQuorum = await callRpc('getactivequorum', [targetHeight])
-      if (activeQuorum && Array.isArray(activeQuorum.members)) {
-        const maskedMembers = activeQuorum.members.map((mn: any) => ({
-          ...mn,
-          ip: maskIpAddress(mn.ip)
-        }))
-        return {
-          success: true,
-          chain: activeQuorum.chain,
-          currentHeight: activeQuorum.currentHeight,
-          targetHeight: activeQuorum.targetHeight ?? targetHeight,
-          dkgHeight: activeQuorum.dkgHeight,
-          seedHeight: activeQuorum.seedHeight,
-          seed: activeQuorum.seed,
-          threshold: activeQuorum.threshold || ((maskedMembers.length < 5) ? 2 : 3),
-          members: maskedMembers
+      activeQuorum = await callRpc('getactivequorum', [targetHeight])
+      if (activeQuorum) {
+        if (activeQuorum.developerFundAddress) {
+          developerFundAddress = String(activeQuorum.developerFundAddress)
+        }
+        if (activeQuorum.sporkPubKey) {
+          sporkPubKey = String(activeQuorum.sporkPubKey)
+        }
+        if (
+          typeof activeQuorum.quorumHash === 'string' &&
+          !/^0+$/.test(activeQuorum.quorumHash)
+        ) {
+          quorumHash = activeQuorum.quorumHash
+        }
+        // Only adopt getactivequorum's dkgHeight/seedHeight/seed if seedHeight is an already-mined block
+        // and the seed is non-zero (when height < nLLMQActivationHeight, getactivequorum returns future block #1999 & 0000... seed)
+        if (
+          typeof activeQuorum.seedHeight === 'number' &&
+          activeQuorum.seedHeight <= currentHeight &&
+          typeof activeQuorum.seed === 'string' &&
+          activeQuorum.seed.length === 64 &&
+          !/^0+$/.test(activeQuorum.seed)
+        ) {
+          dkgHeight = Number(activeQuorum.dkgHeight ?? dkgHeight)
+          seedHeight = Number(activeQuorum.seedHeight)
+          seedHex = activeQuorum.seed
         }
       }
     } catch {
-      // Fallback to manual RPC composition if connected to an older daemon without getactivequorum
+      // Older daemon without getactivequorum or temporary error; live values computed above are used
     }
 
-    // Check if Quorum Rotation is active at targetHeight (H + 1)
-    let fRotationActive = false
-    if (chain === 'main') {
-      fRotationActive = (targetHeight >= 1400)
-    } else if (chain === 'test') {
-      fRotationActive = (targetHeight >= 1000)
-    } else { // regtest
-      fRotationActive = (targetHeight >= 800)
-    }
+    // Build Active Quorum Members strictly from live active Masternodes (enabledMns)
+    let selectedMns: any[] = []
 
-    // Determine DKG height interval
-    const dkgInterval = (chain === 'regtest' || chain === 'test') ? 10 : 100
-    
-    let dkgHeight = Math.floor(targetHeight / dkgInterval) * dkgInterval
-    let seedHeight = dkgHeight - 1
+    if (enabledMns.length > 0) {
+      // First check if getactivequorum returned real Masternodes present in listmasternodes
+      const verifiedFromRpc: any[] = []
+      const seenKeys = new Set<string>()
 
-    if (fRotationActive) {
-      dkgHeight = targetHeight
-      const epochHeight = Math.floor(targetHeight / dkgInterval) * dkgInterval
-      seedHeight = epochHeight - 1
-    }
+      if (Array.isArray(activeQuorum?.members)) {
+        for (const m of activeQuorum.members) {
+          const key = `${String(m.txhash || '').toLowerCase()}:${Number(m.outidx)}`
+          const liveMn = liveMnByOutpoint.get(key)
+          if (liveMn && !seenKeys.has(key)) {
+            seenKeys.add(key)
+            const livePk = String(liveMn.pubkey || '').trim()
+            const memberPk = String(m.pubkey || '').trim()
+            const explicitOpPk = String(m.operatorPubKey || m.blsPubKey || '').trim()
+            const operatorPubKey =
+              (/^[0-9a-fA-F]{96}$/.test(explicitOpPk) ? explicitOpPk : '') ||
+              (/^[0-9a-fA-F]{96}$/.test(livePk) ? livePk : '') ||
+              (/^[0-9a-fA-F]{96}$/.test(memberPk) ? memberPk : '')
+            const pubkey =
+              (/^[0-9a-fA-F]{66,130}$/.test(memberPk) && memberPk.length !== 96
+                ? memberPk
+                : '') ||
+              livePk ||
+              memberPk
+            verifiedFromRpc.push({
+              ...liveMn,
+              ...m,
+              pubkey,
+              operatorPubKey: operatorPubKey || undefined,
+              dip3: Boolean(liveMn.proTxHash || m.proTxHash || operatorPubKey),
+              ip: liveMn.ip || liveMn.addr || m.ip,
+              addr: liveMn.addr || m.addr,
+              status: liveMn.status || 'ENABLED'
+            })
+          }
+        }
+      }
 
-    const seedBuffer = await getAdamSeed(seedHeight)
-    const seedHex = Buffer.from(seedBuffer).reverse().toString('hex')
+      if (verifiedFromRpc.length > 0 && Array.isArray(activeQuorum?.members)) {
+        selectedMns = verifiedFromRpc.slice(0, targetQuorumSize)
+      } else {
+        // Compute deterministic VRF/ADAM score for each live active Masternode
+        const scoredMns = enabledMns.map((mn: any) => {
+          const txhashBytes = Buffer.from(String(mn.txhash), 'hex').reverse()
+          const outidxBytes = Buffer.alloc(4)
+          outidxBytes.writeUInt32LE(parseInt(String(mn.outidx), 10) >>> 0, 0)
 
-    // Get all enabled/active masternodes
-    const allMns = await callRpc('listmasternodes')
-    let enabledMns = (Array.isArray(allMns) ? allMns : []).filter((mn: any) => 
-      mn.status === 'ENABLED' || mn.status === 'ACTIVE'
-    )
+          const data = Buffer.concat([seedBuffer, txhashBytes, outidxBytes])
+          const score = doubleSha256(data).reverse().toString('hex')
 
-    // SEC-12 fallback: when < 5 active masternodes exist, ElectQuorumMembers falls back to GetAdamMinerPool(nHeight - 1)
-    if (enabledMns.length < 5) {
-      const adamMiners = await callRpc('getadamminers', []).catch(() => [])
-      const pool: any[] = Array.isArray(adamMiners?.pool) ? adamMiners.pool : (Array.isArray(adamMiners) ? adamMiners : [])
-      if (pool.length > 0) {
-        enabledMns = pool
-          .map((entry: any, idx: number) => {
-            const pubkeyHex = typeof entry === 'string' ? entry : String(entry?.pubkey || '')
-            if (!pubkeyHex) return null
-            const pubkeyBytes = Buffer.from(pubkeyHex, 'hex')
-            const pseudoTxHash = doubleSha256(pubkeyBytes).reverse().toString('hex')
-            return {
-              rank: idx + 1,
-              txhash: pseudoTxHash,
-              outidx: typeof entry?.index === 'number' ? entry.index : idx,
-              pubkey: pubkeyHex,
-              addr: typeof entry?.address === 'string' ? entry.address : undefined,
-              status: 'ENABLED',
-              ip: `ADAM-Miner #${idx + 1}`
+          const livePk = String(mn.pubkey || '').trim()
+          const operatorPubKey = /^[0-9a-fA-F]{96}$/.test(livePk) ? livePk : undefined
+          return {
+            score,
+            mn: {
+              ...mn,
+              operatorPubKey,
+              dip3: Boolean(mn.proTxHash || operatorPubKey)
             }
-          })
-          .filter(Boolean)
+          }
+        })
+
+        scoredMns.sort((a: any, b: any) => a.score.localeCompare(b.score))
+        // KTDIP3 deduplication by unique BLS operator pubkey in offline fallback
+        const deduped: any[] = []
+        const seenOps = new Set<string>()
+        for (const item of scoredMns) {
+          const opKey = String(item.mn.operatorPubKey || '').toLowerCase()
+          if (opKey && seenOps.has(opKey)) continue
+          if (opKey) seenOps.add(opKey)
+          deduped.push(item.mn)
+          if (deduped.length >= targetQuorumSize) break
+        }
+        selectedMns = deduped
       }
     }
 
-    // Compute score for each masternode
-    const scoredMns = enabledMns.map((mn: any) => {
-      const txhashBytes = Buffer.from(mn.txhash, 'hex').reverse()
-      const outidxBytes = Buffer.alloc(4)
-      outidxBytes.writeUInt32LE(parseInt(mn.outidx), 0)
-
-      const data = Buffer.concat([seedBuffer, txhashBytes, outidxBytes])
-      const score = doubleSha256(data).reverse().toString('hex')
-
-      return {
-        score,
-        mn
-      }
-    })
-
-    // Sort by score ascending (lowest score is ranked highest)
-    scoredMns.sort((a: any, b: any) => a.score.localeCompare(b.score))
-
-    // Select top 5 members (standard DKG behavior matching src/llmq.cpp:ElectQuorumMembers)
-    const selectedMns = scoredMns.slice(0, 5).map((item: any) => item.mn)
-
-    // Mask their IP addresses to prevent DDoS/DoS harvesting
-    const quorumMembers = selectedMns.map((mn: any) => ({
+    // Mask IP addresses to prevent DDoS/DoS harvesting and assign canonical rank
+    const quorumMembers = selectedMns.map((mn: any, idx: number) => ({
       ...mn,
-      ip: maskIpAddress(mn.ip)
+      rank: idx + 1,
+      ip: maskIpAddress(mn.ip || mn.addr)
     }))
 
     return {
       success: true,
+      coreVersion: CORE_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
       chain,
       currentHeight,
       targetHeight,
       dkgHeight,
+      quorumHash,
       seedHeight,
       seed: seedHex,
-      threshold: (quorumMembers.length < 5) ? 2 : 3,
+      developerFundAddress,
+      sporkPubKey,
+      treasuryGovernanceStartHeight: Number(
+        activeQuorum?.treasuryGovernanceStartHeight ?? defaults.treasuryGovernanceStartHeight
+      ),
+      activeMasternodeCount: enabledMns.length,
+      totalMasternodeCount: allMns.length,
+      targetQuorumSize,
+      threshold: Number(
+        activeQuorum?.threshold || getQuorumMajorityThreshold(quorumMembers.length || targetQuorumSize)
+      ),
       members: quorumMembers
     }
   } catch (error: any) {
     return {
       success: false,
-      error: error.message
+      coreVersion: CORE_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      error: sanitizeRpcErrorMessage(error, 'Unable to reach KristaTech RPC node')
     }
   }
 })
