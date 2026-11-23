@@ -1,10 +1,8 @@
-import elliptic from 'elliptic'
+import { secp256k1 } from '@noble/curves/secp256k1'
 import { bls12_381 } from '@noble/curves/bls12-381'
 import { extract as hkdfExtract, expand as hkdfExpand } from '@noble/hashes/hkdf'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
-
-const ec = new elliptic.ec('secp256k1')
 
 export const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
 export const CORE_VERSION = 'v1.5.9.0'
@@ -177,26 +175,39 @@ export function encodeBase58Check(payload: Uint8Array): string {
   return out
 }
 
+const VALID_WIF_PREFIXES = new Set([0x2b, 0x80, 0xef])
+
 export function getRawPrivateKeyFromWIF(wifString: string): string {
   const decoded = decodeBase58(String(wifString || '').trim())
-  // WIF is: [prefix (1B)] [privkey (32B)] [optional compression flag 0x01 (1B)] [checksum (4B)]
-  if (decoded.length !== 37 && (decoded.length !== 38 || decoded[33] !== 0x01)) {
-    throw new Error('Invalid WIF byte length or compression flag')
-  }
-  const payload = decoded.slice(0, decoded.length - 4)
-  const checksum = decoded.slice(decoded.length - 4)
-  const expectedChecksum = doubleSha256Bytes(payload).slice(0, 4)
-  for (let i = 0; i < 4; i++) {
-    if (checksum[i] !== expectedChecksum[i]) {
-      throw new Error('Invalid WIF Base58Check checksum')
+  let payload: Uint8Array | null = null
+  let rawKey: Uint8Array | null = null
+  try {
+    // WIF is: [prefix (1B)] [privkey (32B)] [optional compression flag 0x01 (1B)] [checksum (4B)]
+    if (decoded.length !== 37 && (decoded.length !== 38 || decoded[33] !== 0x01)) {
+      throw new Error('Invalid WIF byte length or compression flag')
     }
-  }
+    if (!VALID_WIF_PREFIXES.has(decoded[0]!)) {
+      throw new Error(`Invalid WIF version prefix byte (0x${decoded[0]!.toString(16)})`)
+    }
+    payload = decoded.slice(0, decoded.length - 4)
+    const checksum = decoded.subarray(decoded.length - 4)
+    const expectedChecksum = doubleSha256Bytes(payload).slice(0, 4)
+    for (let i = 0; i < 4; i++) {
+      if (checksum[i] !== expectedChecksum[i]) {
+        throw new Error('Invalid WIF Base58Check checksum')
+      }
+    }
 
-  const rawKey = decoded.slice(1, 33)
-  if (rawKey.every((b) => b === 0)) {
-    throw new Error('Invalid zero private key in WIF')
+    rawKey = decoded.slice(1, 33)
+    if (rawKey.every((b) => b === 0) || !secp256k1.utils.isValidPrivateKey(rawKey)) {
+      throw new Error('Invalid or out-of-range secp256k1 private key in WIF')
+    }
+    return bytesToHex(rawKey)
+  } finally {
+    decoded.fill(0)
+    if (payload) payload.fill(0)
+    if (rawKey) rawKey.fill(0)
   }
-  return bytesToHex(rawKey)
 }
 
 export function derivePubKeysFromWIF(wifString: string): {
@@ -205,11 +216,15 @@ export function derivePubKeysFromWIF(wifString: string): {
   uncompressedPubKey: string
 } {
   const privKeyHex = getRawPrivateKeyFromWIF(wifString)
-  const key = ec.keyFromPrivate(privKeyHex, 'hex')
-  return {
-    privKeyHex,
-    compressedPubKey: key.getPublic(true, 'hex').toLowerCase(),
-    uncompressedPubKey: key.getPublic(false, 'hex').toLowerCase()
+  const privBytes = hexToBytes(privKeyHex)
+  try {
+    return {
+      privKeyHex,
+      compressedPubKey: bytesToHex(secp256k1.getPublicKey(privBytes, true)).toLowerCase(),
+      uncompressedPubKey: bytesToHex(secp256k1.getPublicKey(privBytes, false)).toLowerCase()
+    }
+  } finally {
+    privBytes.fill(0)
   }
 }
 
@@ -326,13 +341,12 @@ export function pubkeysMatch(pkHexA: string, pkHexB: string): boolean {
     const cleanA = String(pkHexA || '').trim().toLowerCase()
     const cleanB = String(pkHexB || '').trim().toLowerCase()
     if (!cleanA || !cleanB) return false
-    if (cleanA === cleanB) return true
     if (/^[0-9a-f]{96}$/.test(cleanA) || /^[0-9a-f]{96}$/.test(cleanB)) {
       return false
     }
-    const keyA = ec.keyFromPublic(cleanA, 'hex')
-    const keyB = ec.keyFromPublic(cleanB, 'hex')
-    return keyA.getPublic(true, 'hex').toLowerCase() === keyB.getPublic(true, 'hex').toLowerCase()
+    const normA = bytesToHex(secp256k1.ProjectivePoint.fromHex(cleanA).toRawBytes(true)).toLowerCase()
+    const normB = bytesToHex(secp256k1.ProjectivePoint.fromHex(cleanB).toRawBytes(true)).toLowerCase()
+    return normA === normB
   } catch {
     return false
   }
@@ -430,10 +444,22 @@ export function getPushDataPrefixBytes(length: number): Uint8Array {
   }
 }
 
-export function extractScriptSigPushesBytes(scriptSigHex: string): Uint8Array[] {
+export function extractScriptSigPushesStrict(scriptSigHex: string): {
+  valid: boolean
+  pushes: Uint8Array[]
+  error?: string
+} {
   const clean = String(scriptSigHex || '').trim()
-  if (!clean) return []
-  const buf = hexToBytes(clean)
+  if (!clean) {
+    return { valid: false, pushes: [], error: 'Empty scriptSig' }
+  }
+  let buf: Uint8Array
+  try {
+    buf = hexToBytes(clean)
+  } catch {
+    return { valid: false, pushes: [], error: 'Invalid scriptSig hex' }
+  }
+
   const pushes: Uint8Array[] = []
   let i = 0
   while (i < buf.length) {
@@ -443,25 +469,88 @@ export function extractScriptSigPushesBytes(scriptSigHex: string): Uint8Array[] 
     if (op >= 1 && op <= 75) {
       len = op
     } else if (op === 76) {
-      if (i + 1 > buf.length) break
+      if (i + 1 > buf.length) {
+        return { valid: false, pushes: [], error: 'Truncated OP_PUSHDATA1 length in scriptSig' }
+      }
       len = buf[i]!
       i += 1
+      if (len < 76) {
+        return { valid: false, pushes: [], error: 'Non-minimal OP_PUSHDATA1 push in scriptSig' }
+      }
     } else if (op === 77) {
-      if (i + 2 > buf.length) break
+      if (i + 2 > buf.length) {
+        return { valid: false, pushes: [], error: 'Truncated OP_PUSHDATA2 length in scriptSig' }
+      }
       len = buf[i]! | (buf[i + 1]! << 8)
       i += 2
+      if (len <= 255) {
+        return { valid: false, pushes: [], error: 'Non-minimal OP_PUSHDATA2 push in scriptSig' }
+      }
     } else if (op === 78) {
-      if (i + 4 > buf.length) break
+      if (i + 4 > buf.length) {
+        return { valid: false, pushes: [], error: 'Truncated OP_PUSHDATA4 length in scriptSig' }
+      }
       len = (buf[i]! | (buf[i + 1]! << 8) | (buf[i + 2]! << 16) | (buf[i + 3]! << 24)) >>> 0
       i += 4
+      if (len <= 65535) {
+        return { valid: false, pushes: [], error: 'Non-minimal OP_PUSHDATA4 push in scriptSig' }
+      }
     } else {
-      break
+      return {
+        valid: false,
+        pushes: [],
+        error: `Disallowed non-push opcode 0x${op.toString(16)} in scriptSig`
+      }
     }
-    if (i + len > buf.length) break
+    if (i + len > buf.length) {
+      return { valid: false, pushes: [], error: 'Truncated push data in scriptSig' }
+    }
     pushes.push(buf.subarray(i, i + len))
     i += len
   }
-  return pushes
+
+  if (i !== buf.length) {
+    return { valid: false, pushes: [], error: 'Unconsumed trailing bytes in scriptSig' }
+  }
+  return { valid: true, pushes }
+}
+
+export function extractScriptSigPushesBytes(scriptSigHex: string): Uint8Array[] {
+  const res = extractScriptSigPushesStrict(scriptSigHex)
+  return res.valid ? res.pushes : []
+}
+
+/**
+ * Parses input outpoints (`txid:vout` with canonical reversed 32-byte txid) from raw transaction hex.
+ */
+export function extractInputOutpoints(rawTxHex: string): string[] {
+  try {
+    const txBuf = hexToBytes(rawTxHex)
+    if (txBuf.length < 10) return []
+    let offset = 4
+    const vinCountInfo = readCompactSizeBytes(txBuf, offset)
+    offset += vinCountInfo.size
+    const outpoints: string[] = []
+    for (let i = 0; i < vinCountInfo.value; i++) {
+      if (offset + 36 > txBuf.length) return []
+      const txid = bytesToHex(new Uint8Array(txBuf.subarray(offset, offset + 32)).reverse())
+      offset += 32
+      const vout =
+        (txBuf[offset]! |
+          (txBuf[offset + 1]! << 8) |
+          (txBuf[offset + 2]! << 16) |
+          (txBuf[offset + 3]! << 24)) >>>
+        0
+      offset += 4
+      const scriptLenInfo = readCompactSizeBytes(txBuf, offset)
+      offset += scriptLenInfo.size + scriptLenInfo.value + 4
+      if (offset > txBuf.length) return []
+      outpoints.push(`${txid}:${vout}`)
+    }
+    return outpoints
+  } catch {
+    return []
+  }
 }
 
 export function computeSighashAllBytes(
@@ -550,9 +639,8 @@ export function verifySporkInputSignature(
       hexToBytes('88ac')
     )
 
-    const key = ec.keyFromPublic(sporkPubKeyHex.trim(), 'hex')
     const sighashSpork = computeSighashAllBytes(rawTxHex, inputIndex, sporkScriptCode)
-    if (key.verify(sighashSpork, derSig)) {
+    if (secp256k1.verify(derSig, sighashSpork, sporkPubKeyBuf, { lowS: true })) {
       return { valid: true }
     }
 
@@ -591,8 +679,7 @@ export function createHybridBLSSignedData(
   let blsPrivKey: Uint8Array | null = null
 
   try {
-    const key = ec.keyFromPrivate(privKeyHex, 'hex')
-    const compressedPubKey = key.getPublic(true, 'hex')
+    const compressedPubKey = bytesToHex(secp256k1.getPublicKey(privKeyBytes, true)).toLowerCase()
 
     seedInput.set(privKeyBytes, 0)
     seedInput.set(msgBlockHash, privKeyBytes.length)
@@ -605,10 +692,10 @@ export function createHybridBLSSignedData(
     const blsPubKey = bls12_381.getPublicKey(blsPrivKey) // 48 bytes
     const blsSig = bls12_381.sign(msgBlockHash, blsPrivKey, { DST: BLS_DST }) // 96 bytes
 
-    // Sign Hash(blsPubKey) (double-SHA256) with Masternode secp256k1 key
+    // Sign Hash(blsPubKey) (double-SHA256) with Masternode secp256k1 key (low-S canonical DER)
     const hashPubKey = doubleSha256Bytes(blsPubKey)
-    const ecdsaSig = key.sign(Array.from(hashPubKey), { canonical: true })
-    const ecdsaDerBytes = new Uint8Array(ecdsaSig.toDER())
+    const ecdsaSig = secp256k1.sign(hashPubKey, privKeyBytes, { lowS: true })
+    const ecdsaDerBytes = ecdsaSig.toDERRawBytes()
     const ecdsaCompactLen = writeCompactSizeBytes(ecdsaDerBytes.length)
 
     const signedDataBytes = concatBytes(blsPubKey, blsSig, ecdsaCompactLen, ecdsaDerBytes)
@@ -779,25 +866,18 @@ export function verifyAndParseBLSSignedData(
 
     let mode: 'dip3-operator' | 'hybrid'
     if (expectedOperatorPk) {
-      // KTDIP3 consensus (VerifyAdamOrDip3Signature -> VerifyDip3OperatorBLS) requires registered 48B BLS operator key
-      if (!blsPubKeysMatch(sigBlsPkHex, expectedOperatorPk)) {
+      // KTDIP3 consensus strictly requires 145B pure-operator CBLSSignedData (48B pk + 96B sig + 0x00)
+      if (sigBuf.length !== 145 || ecdsaLenInfo.value !== 0) {
         return {
           valid: false,
           error:
-            ecdsaLenInfo.value > 0
-              ? 'KTDIP3 masternode requires signature from registered 48B BLS operator key (not an ephemeral WIF key)'
-              : 'BLS operator public key does not match registered KTDIP3 masternode operator key'
+            'KTDIP3 masternode requires 145B pure operator BLS signature (trailing ECDSA/hybrid payload is rejected)'
         }
       }
-      if (ecdsaLenInfo.value > 0 && !/^[0-9a-fA-F]{96}$/.test(memberPubkeyHex.trim())) {
-        const ecdsaSig = sigBuf.subarray(144 + ecdsaLenInfo.size, expectedTotal)
-        const hashPubKey = doubleSha256Bytes(blsPubKey)
-        const key = ec.keyFromPublic(memberPubkeyHex.trim(), 'hex')
-        if (!key.verify(hashPubKey, ecdsaSig)) {
-          return {
-            valid: false,
-            error: 'Invalid Masternode ECDSA authorization signature over Hash(blsPubKey)'
-          }
+      if (!blsPubKeysMatch(sigBlsPkHex, expectedOperatorPk)) {
+        return {
+          valid: false,
+          error: 'BLS operator public key does not match registered KTDIP3 masternode operator key'
         }
       }
       mode = 'dip3-operator'
@@ -811,8 +891,8 @@ export function verifyAndParseBLSSignedData(
       mode = 'hybrid'
       const ecdsaSig = sigBuf.subarray(144 + ecdsaLenInfo.size, expectedTotal)
       const hashPubKey = doubleSha256Bytes(blsPubKey)
-      const key = ec.keyFromPublic(memberPubkeyHex.trim(), 'hex')
-      if (!key.verify(hashPubKey, ecdsaSig)) {
+      const memberPubBytes = hexToBytes(memberPubkeyHex.trim())
+      if (!secp256k1.verify(ecdsaSig, hashPubKey, memberPubBytes, { lowS: true })) {
         return {
           valid: false,
           error: 'Invalid Masternode ECDSA authorization signature over Hash(blsPubKey)'

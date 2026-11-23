@@ -6,6 +6,28 @@ import type { H3Event } from 'h3'
 import { getRequestHeader } from 'h3'
 
 /**
+ * Build a per-request strict Content-Security-Policy header for SSR HTML responses.
+ */
+export function buildHtmlCsp(nonce: string, isDev = false): string {
+  const safeNonce = String(nonce || '').replace(/[^A-Za-z0-9+/=_-]/g, '')
+  const scriptSrc = safeNonce ? `'self' 'nonce-${safeNonce}'` : "'self'"
+  const connectSrc = isDev ? "'self' ws://127.0.0.1:* http://127.0.0.1:*" : "'self'"
+  return [
+    "default-src 'self'",
+    `script-src ${scriptSrc}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    `connect-src ${connectSrc}`,
+    "worker-src 'self'",
+    "frame-ancestors 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "form-action 'self'"
+  ].join('; ')
+}
+
+/**
  * Immutable defense-in-depth HTTP security headers (modern-web-guidance: security §1.4, §3.4, §3.5, §3.7).
  */
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -16,8 +38,7 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze(
     'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()',
   'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
   'Cross-Origin-Resource-Policy': 'same-origin',
-  'Content-Security-Policy':
-    "frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'"
+  'Content-Security-Policy': buildHtmlCsp('', false)
 })
 
 /**
@@ -43,9 +64,13 @@ export function isTrustedProxyAddress(ip: string): boolean {
   return false
 }
 
+const IP_REGEX = /^[0-9a-fA-F:.]{3,45}$/
+const MUTATING_HTTP_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 /**
  * Resolves the client IP safely without allowing arbitrary X-Forwarded-For spoofing.
  * Forwarded headers are only trusted when NUXT_TRUST_PROXY=true AND the direct socket IP is a local/private proxy.
+ * Uses x-real-ip first, or traverses x-forwarded-for from right to left to pick the rightmost untrusted client hop.
  */
 export function resolveClientIp(event: H3Event, trustProxyOverride?: boolean): string {
   const socketIp = normalizeIp(event?.node?.req?.socket?.remoteAddress || '127.0.0.1')
@@ -55,16 +80,25 @@ export function resolveClientIp(event: H3Event, trustProxyOverride?: boolean): s
       : process.env.NUXT_TRUST_PROXY === 'true'
 
   if (trustProxy && isTrustedProxyAddress(socketIp)) {
+    const realIp = getRequestHeader(event, 'x-real-ip')?.trim()
+    if (realIp && IP_REGEX.test(realIp)) {
+      return normalizeIp(realIp)
+    }
     const xff = getRequestHeader(event, 'x-forwarded-for')
     if (xff) {
-      const firstHop = xff.split(',')[0]?.trim()
-      if (firstHop && /^[0-9a-fA-F:.]{3,45}$/.test(firstHop)) {
-        return normalizeIp(firstHop)
+      const hops = xff
+        .split(',')
+        .map((h) => h.trim())
+        .filter((h) => Boolean(h) && IP_REGEX.test(h))
+      for (let i = hops.length - 1; i >= 0; i--) {
+        const normHop = normalizeIp(hops[i]!)
+        if (!isTrustedProxyAddress(normHop)) {
+          return normHop
+        }
       }
-    }
-    const realIp = getRequestHeader(event, 'x-real-ip')?.trim()
-    if (realIp && /^[0-9a-fA-F:.]{3,45}$/.test(realIp)) {
-      return normalizeIp(realIp)
+      if (hops.length > 0) {
+        return normalizeIp(hops[0]!)
+      }
     }
   }
 
@@ -73,8 +107,8 @@ export function resolveClientIp(event: H3Event, trustProxyOverride?: boolean): s
 
 /**
  * Enforces Fetch Metadata resource isolation (Sec-Fetch-Site) per modern-web-guidance: security §3.7.
- * Rejects cross-site requests to non-navigational API endpoints while permitting same-origin,
- * same-site, direct user navigation, and legacy user agents that omit Sec-Fetch-Site.
+ * Rejects cross-site requests and state-changing same-site requests to API endpoints, while permitting
+ * same-origin, direct user navigation, and legacy user agents that omit Sec-Fetch-Site.
  */
 export function isAllowedFetchSite(
   secFetchSite: unknown,
@@ -86,12 +120,17 @@ export function isAllowedFetchSite(
     return true
   }
 
+  const normalizedMethod = typeof method === 'string' ? method.toUpperCase() : 'GET'
+  const isMutating = MUTATING_HTTP_METHODS.has(normalizedMethod)
   const site = secFetchSite.trim().toLowerCase()
-  if (site === 'same-origin' || site === 'same-site' || site === 'none') {
+
+  if (site === 'same-origin' || site === 'none') {
     return true
   }
+  if (site === 'same-site') {
+    return !isMutating
+  }
 
-  const normalizedMethod = typeof method === 'string' ? method.toUpperCase() : 'GET'
   const mode = typeof secFetchMode === 'string' ? secFetchMode.trim().toLowerCase() : ''
   const dest = typeof secFetchDest === 'string' ? secFetchDest.trim().toLowerCase() : ''
 
@@ -143,19 +182,26 @@ export function checkApiRateLimit(
   windowMs: number
 ): { allowed: boolean; remaining: number; retryAfterSec: number } {
   const now = Date.now()
-
-  if (rateLimitBuckets.size > MAX_RATE_BUCKETS) {
-    for (const [k, v] of rateLimitBuckets.entries()) {
-      if (v.resetAt <= now) {
-        rateLimitBuckets.delete(k)
-      }
-    }
-  }
-
   const key = `${bucket}:${normalizeIp(clientIp)}`
   const existing = rateLimitBuckets.get(key)
 
+  if (existing && existing.resetAt <= now) {
+    rateLimitBuckets.delete(key)
+  }
+
   if (!existing || existing.resetAt <= now) {
+    if (rateLimitBuckets.size >= MAX_RATE_BUCKETS) {
+      for (const [k, v] of rateLimitBuckets.entries()) {
+        if (v.resetAt <= now) {
+          rateLimitBuckets.delete(k)
+        }
+      }
+      while (rateLimitBuckets.size >= MAX_RATE_BUCKETS) {
+        const oldestKey = rateLimitBuckets.keys().next().value
+        if (oldestKey === undefined) break
+        rateLimitBuckets.delete(oldestKey)
+      }
+    }
     rateLimitBuckets.set(key, {
       count: 1,
       resetAt: now + windowMs
@@ -229,7 +275,12 @@ export function sanitizeRpcErrorMessage(
   const cleaned = raw
     .replace(/https?:\/\/[^\s]+/gi, '[redacted-url]')
     .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [redacted]')
-    .replace(/\/home\/[^\s:]+/gi, '[redacted-path]')
+    .replace(/(?:\/(?:home|root|var|etc|tmp|opt|srv|Users)\/[^\s:;,'"]+)/gi, '[redacted-path]')
+    .replace(/[A-Za-z]:\\[^\s:;,'"]+/g, '[redacted-path]')
+    .replace(
+      /(?:localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}|\[::1\]):\d{2,5}\b/gi,
+      '[redacted-endpoint]'
+    )
     .slice(0, 240)
     .trim()
 
@@ -300,9 +351,15 @@ export function isAllowedRpcMethod(method: unknown): method is string {
   return typeof method === 'string' && ALLOWED_RPC_METHODS.has(method.trim())
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  return h === '127.0.0.1' || h === 'localhost' || h === '::1'
+}
+
 /**
  * Resolves KristaTech RPC URL and Basic Auth credentials from environment variables or
  * local ~/.kristatech/kristatech.conf and ~/.kristatech/.cookie (matching Explorer RPC discovery).
+ * Fails closed when no RPC credentials are available or remote plaintext HTTP is configured.
  */
 export function resolveKristaRpcConfig(): { url: string; authBase64: string } {
   let host = '127.0.0.1'
@@ -326,8 +383,12 @@ export function resolveKristaRpcConfig(): { url: string; authBase64: string } {
           if (!val) continue
           if (key === 'rpcuser' && !user) user = val
           else if (key === 'rpcpassword' && !pass) pass = val
-          else if (key === 'rpcport') port = val
-          else if (key === 'rpcconnect') host = val
+          else if (key === 'rpcport' && /^\d{1,5}$/.test(val)) {
+            const portNum = Number(val)
+            if (portNum >= 1 && portNum <= 65535) port = String(portNum)
+          } else if (key === 'rpcconnect' && /^[a-zA-Z0-9.:[\]-]+$/.test(val)) {
+            host = val
+          }
         }
       }
       if (!user || !pass) {
@@ -342,15 +403,38 @@ export function resolveKristaRpcConfig(): { url: string; authBase64: string } {
         }
       }
     } catch {
-      // Ignore local config read errors and use fallback defaults
+      // Ignore local config read errors and evaluate credentials below
     }
   }
 
-  const finalUser = user || 'kristarpc'
-  const finalPass = pass || 'kristapassword'
-  const url = process.env.NUXT_RPC_URL || `http://${host}:${port}`
-  const authBase64 = Buffer.from(`${finalUser}:${finalPass}`).toString('base64')
-  return { url, authBase64 }
+  if (!user || !pass) {
+    throw new Error(
+      'KristaTech RPC credentials are not configured (set NUXT_RPC_USER/NUXT_RPC_PASSWORD or provide ~/.kristatech/kristatech.conf or .cookie)'
+    )
+  }
+
+  const rawUrl = process.env.NUXT_RPC_URL ? process.env.NUXT_RPC_URL.trim() : `http://${host}:${port}`
+  let parsedUrl: URL
+  try {
+    parsedUrl = new URL(rawUrl)
+  } catch {
+    throw new Error('Invalid KristaTech RPC URL configuration')
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error('Unsupported KristaTech RPC protocol')
+  }
+  if (
+    parsedUrl.protocol === 'http:' &&
+    !isLoopbackHost(parsedUrl.hostname) &&
+    process.env.NUXT_ALLOW_INSECURE_REMOTE_RPC !== 'true'
+  ) {
+    throw new Error(
+      'Refusing plaintext HTTP RPC connection to non-loopback host without NUXT_ALLOW_INSECURE_REMOTE_RPC=true'
+    )
+  }
+
+  const authBase64 = Buffer.from(`${user}:${pass}`).toString('base64')
+  return { url: parsedUrl.toString().replace(/\/$/, ''), authBase64 }
 }
 
 export async function callKristaRpc(method: string, params: any[] = []): Promise<any> {

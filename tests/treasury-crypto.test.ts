@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import elliptic from 'elliptic'
+import { secp256k1 } from '@noble/curves/secp256k1'
 import {
   CHAIN_DEFAULTS,
   CORE_VERSION,
@@ -22,7 +22,9 @@ import {
   writeCompactSizeBytes,
   readCompactSizeBytes,
   getPushDataPrefixBytes,
+  extractInputOutpoints,
   extractScriptSigPushesBytes,
+  extractScriptSigPushesStrict,
   computeSighashAllBytes,
   verifySporkInputSignature,
   deriveBlsPubKeyFromSecret,
@@ -35,8 +37,6 @@ import {
   injectQuorumSigIntoRawTxBytes,
   maskIpAddress
 } from '../app/utils/treasuryCrypto.ts'
-
-const ec = new elliptic.ec('secp256k1')
 
 function createTestWif(secretByte: number, compressed = true, version = 0x80): string {
   const privKey = new Uint8Array(32).fill(secretByte)
@@ -76,6 +76,24 @@ describe('treasuryCrypto — Encoding, WIF & Address Validation', () => {
     const tamperedWif = wif.slice(0, -1) + lastChar
     assert.throws(() => derivePubKeysFromWIF(tamperedWif), /checksum|Invalid WIF/i)
     assert.throws(() => getRawPrivateKeyFromWIF(tamperedWif), /checksum|Invalid WIF/i)
+
+    // Accept Krista Mainnet (0x2b), Legacy (0x80), and Testnet/Regtest (0xef) WIF version bytes
+    for (const prefix of [0x2b, 0x80, 0xef]) {
+      const validWif = createTestWif(0x12, true, prefix)
+      assert.equal(getRawPrivateKeyFromWIF(validWif), '12'.repeat(32))
+    }
+
+    // Reject unknown WIF version prefix byte
+    const badPrefixWif = createTestWif(0x12, true, 0x99)
+    assert.throws(() => getRawPrivateKeyFromWIF(badPrefixWif), /prefix/i)
+
+    // Reject out-of-range secp256k1 private key scalar (>= CURVE.n)
+    const highScalarPayload = new Uint8Array(34)
+    highScalarPayload[0] = 0x80
+    highScalarPayload.fill(0xff, 1, 33)
+    highScalarPayload[33] = 0x01
+    const highScalarWif = encodeBase58Check(highScalarPayload)
+    assert.throws(() => getRawPrivateKeyFromWIF(highScalarWif), /out-of-range|Invalid/i)
   })
 
   it('validates Krista Base58Check (KT... / kt...) addresses and rejects tampered checksums', () => {
@@ -170,9 +188,9 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
 
   it('creates and verifies Spork SIGHASH_ALL input signatures and Hybrid BLS Quorum signatures', () => {
     const sporkPrivHex = '33'.repeat(32)
-    const sporkKey = ec.keyFromPrivate(sporkPrivHex, 'hex')
-    const sporkPubHex = sporkKey.getPublic(true, 'hex')
-    const sporkPubBytes = hexToBytes(sporkPubHex)
+    const sporkPrivBytes = hexToBytes(sporkPrivHex)
+    const sporkPubBytes = secp256k1.getPublicKey(sporkPrivBytes, true)
+    const sporkPubHex = bytesToHex(sporkPubBytes)
     const sporkPkh = hash160Bytes(sporkPubBytes)
 
     // P2PKH subscript: OP_DUP OP_HASH160 <20-byte-pkh> OP_EQUALVERIFY OP_CHECKSIG
@@ -212,8 +230,8 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
 
     // Compute SIGHASH_ALL and sign with Spork private key
     const sighash = computeSighashAllBytes(bytesToHex(unsignedTx), 0, subScript)
-    const ecdsaSig = sporkKey.sign(Array.from(sighash), { canonical: true })
-    const derSig = new Uint8Array(ecdsaSig.toDER())
+    const ecdsaSig = secp256k1.sign(sighash, sporkPrivBytes, { lowS: true })
+    const derSig = ecdsaSig.toDERRawBytes()
     const sigWithHashType = new Uint8Array(derSig.length + 1)
     sigWithHashType.set(derSig, 0)
     sigWithHashType[derSig.length] = 0x01 // SIGHASH_ALL
@@ -254,14 +272,33 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
     )
     assert.equal(verified.valid, true)
 
+    // Reject malleable high-S ECDSA signature in verifySporkInputSignature
+    const highSSig = new secp256k1.Signature(ecdsaSig.r, secp256k1.CURVE.n - ecdsaSig.s)
+    const highSDer = highSSig.toDERRawBytes()
+    const highSSigWithHashType = new Uint8Array(highSDer.length + 1)
+    highSSigWithHashType.set(highSDer, 0)
+    highSSigWithHashType[highSDer.length] = 0x01
+    assert.equal(
+      verifySporkInputSignature(signedTxHex, 0, highSSigWithHashType, sporkPubBytes, sporkPubHex).valid,
+      false
+    )
+
+    // Strict scriptSig parser rejects non-push opcodes, non-minimal OP_PUSHDATA1, and trailing bytes
+    const strictOk = extractScriptSigPushesStrict(bytesToHex(scriptSig))
+    assert.equal(strictOk.valid, true)
+    assert.equal(strictOk.pushes.length, 2)
+    assert.equal(extractScriptSigPushesStrict(bytesToHex(scriptSig) + '61').valid, false) // trailing OP_NOP
+    assert.equal(extractScriptSigPushesStrict('4c01aa').valid, false) // non-minimal OP_PUSHDATA1 (1 byte)
+    assert.deepEqual(extractInputOutpoints(signedTxHex), ['aa'.repeat(32) + ':0'])
+
     // Verify against a different Spork public key -> must fail
-    const otherKey = ec.keyFromPrivate('44'.repeat(32), 'hex')
+    const otherPubBytes = secp256k1.getPublicKey(hexToBytes('44'.repeat(32)), true)
     const wrongVerify = verifySporkInputSignature(
       signedTxHex,
       0,
       sigWithHashType,
       sporkPubBytes,
-      otherKey.getPublic(true, 'hex')
+      bytesToHex(otherPubBytes)
     )
     assert.equal(wrongVerify.valid, false)
 
@@ -403,6 +440,21 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
         mnKeys.compressedPubKey,
         derivedOp.blsPubKeyHex
       ).valid,
+      false
+    )
+    // Also reject KTDIP3 signatures with trailing ecdsaSig bytes even when memberPubkeyHex is 96-hex BLS
+    assert.equal(
+      verifyAndParseBLSSignedData(
+        hybridSig.signedDataHex,
+        txHash,
+        derivedOp.blsPubKeyHex,
+        derivedOp.blsPubKeyHex
+      ).valid,
+      false
+    )
+    const bloatedOpSig = sig1.signedDataHex.slice(0, -2) + '01aa'
+    assert.equal(
+      verifyAndParseBLSSignedData(bloatedOpSig, txHash, op1.blsPubKeyHex, op1.blsPubKeyHex).valid,
       false
     )
   })

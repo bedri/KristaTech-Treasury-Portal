@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { defineEventHandler, readBody, setResponseStatus } from 'h3'
+import { defineEventHandler, getRequestHeader, readBody, setResponseStatus } from 'h3'
 import {
   acquireProposalLock,
   callKristaRpc,
@@ -15,7 +15,8 @@ import {
   bytesToHex,
   calculateTxHash,
   concatBytes,
-  extractScriptSigPushesBytes,
+  extractInputOutpoints,
+  extractScriptSigPushesStrict,
   getPushDataPrefixBytes,
   getQuorumMajorityThreshold,
   injectQuorumSigIntoRawTxBytes,
@@ -107,9 +108,31 @@ export default defineEventHandler(async (event) => {
   }
 
   if (method === 'POST') {
+    const globalRateCheck = checkApiRateLimit('proposals-post-global', clientIp, 40, 60_000)
+    if (!globalRateCheck.allowed) {
+      setResponseStatus(event, 429)
+      return {
+        success: false,
+        error: `Rate limit exceeded. Try again in ${globalRateCheck.retryAfterSec}s.`
+      }
+    }
+
+    const contentLengthHeader = getRequestHeader(event, 'content-length')
+    if (contentLengthHeader !== undefined) {
+      const headerLen = Number(contentLengthHeader)
+      if (!Number.isFinite(headerLen) || headerLen < 0 || headerLen > 262_144) {
+        setResponseStatus(event, 413)
+        return { success: false, error: 'Payload too large (max 256 KB)' }
+      }
+    }
+
     const body = await readBody(event).catch(() => null)
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return { success: false, error: 'Invalid request body' }
+    }
+    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > 262_144) {
+      setResponseStatus(event, 413)
+      return { success: false, error: 'Payload too large (max 256 KB)' }
     }
 
     const { action } = body as Record<string, any>
@@ -217,6 +240,17 @@ export default defineEventHandler(async (event) => {
           return { success: false, error: 'Proposal with this txHash already exists' }
         }
 
+        const pendingOutpoints = new Set<string>()
+        for (const p of pendingProposals) {
+          const outpoints = Array.isArray(p.inputOutpoints)
+            ? p.inputOutpoints
+            : extractInputOutpoints(String(p.rawTxHex || ''))
+          for (const pt of outpoints) {
+            pendingOutpoints.add(String(pt).toLowerCase())
+          }
+        }
+        const currentTxOutpoints = new Set<string>()
+
         for (let i = 0; i < decodedTx.vin.length; i++) {
           const vin = decodedTx.vin[i]
           if (!vin.txid || vin.vout === undefined) {
@@ -225,6 +259,15 @@ export default defineEventHandler(async (event) => {
               error: 'Invalid coinbase or missing input outpoint in proposal transaction'
             }
           }
+          const outpointKey = `${String(vin.txid).toLowerCase()}:${Number(vin.vout)}`
+          if (pendingOutpoints.has(outpointKey) || currentTxOutpoints.has(outpointKey)) {
+            return {
+              success: false,
+              error: `Input UTXO ${outpointKey} is already claimed by another pending proposal`
+            }
+          }
+          currentTxOutpoints.add(outpointKey)
+
           // Check UTXO is unspent and belongs to Developer Fund Address
           const txOut = await callRpc('gettxout', [vin.txid, Number(vin.vout), true])
           if (!txOut) {
@@ -243,14 +286,15 @@ export default defineEventHandler(async (event) => {
             }
           }
 
-          // Check scriptSig contains <sporkSig> <sporkPubKey> and cryptographically verify Spork ECDSA signature
-          const pushes = extractScriptSigPushesBytes(vin.scriptSig?.hex || '')
-          if (pushes.length < 2) {
+          // Check scriptSig contains strictly <sporkSig> <sporkPubKey> with no malleable trailing pushes/opcodes
+          const strictScriptSig = extractScriptSigPushesStrict(vin.scriptSig?.hex || '')
+          if (!strictScriptSig.valid || strictScriptSig.pushes.length !== 2) {
             return {
               success: false,
-              error: 'Input scriptSig must be pre-signed with Spork signature and Spork public key'
+              error: `Input #${i} scriptSig must strictly contain <sporkSig> <sporkPubKey> (${strictScriptSig.error || 'unexpected push count'})`
             }
           }
+          const pushes = strictScriptSig.pushes
           const sporkVerify = verifySporkInputSignature(
             cleanRawHex,
             i,
@@ -280,9 +324,10 @@ export default defineEventHandler(async (event) => {
             }
           }
           const outAddr = normalizeTaprootAddress(voutAddresses[0]!)
-          const outSats = Math.round(Number(vout.value) * 1e8)
-          if (outSats <= 0) {
-            return { success: false, error: `Output #${outIdx} has non-positive value` }
+          const valNum = Number(vout.value)
+          const outSats = Number.isFinite(valNum) ? Math.round(valNum * 1e8) : NaN
+          if (!Number.isSafeInteger(outSats) || outSats <= 0) {
+            return { success: false, error: `Output #${outIdx} has non-positive or invalid value` }
           }
           if (outAddr === cleanTargetAddress) {
             targetAmountSats += outSats
@@ -295,7 +340,12 @@ export default defineEventHandler(async (event) => {
         }
 
         const requestedAmountSats = Math.round(requestedAmount * 1e8)
-        if (targetAmountSats <= 0 || targetAmountSats !== requestedAmountSats) {
+        if (
+          !Number.isSafeInteger(requestedAmountSats) ||
+          requestedAmountSats <= 0 ||
+          targetAmountSats <= 0 ||
+          targetAmountSats !== requestedAmountSats
+        ) {
           return {
             success: false,
             error: `Proposal amount (${requestedAmount} KRISTA) does not match transaction output total to ${cleanTargetAddress} (${targetAmountSats / 1e8} KRISTA)`
@@ -306,6 +356,7 @@ export default defineEventHandler(async (event) => {
           id: crypto.randomUUID(),
           rawTxHex: cleanRawHex,
           txHash: cleanTxHash,
+          inputOutpoints: Array.from(currentTxOutpoints),
           targetAddress: cleanTargetAddress,
           amount: targetAmountSats / 1e8,
           signatures: [],
@@ -380,6 +431,16 @@ export default defineEventHandler(async (event) => {
           return {
             success: false,
             error: `Failed to fetch active quorum: ${sanitizeRpcErrorMessage(err)}`
+          }
+        }
+
+        if (
+          quorumInfo.treasuryGovernanceStartHeight &&
+          quorumInfo.targetHeight < quorumInfo.treasuryGovernanceStartHeight
+        ) {
+          return {
+            success: false,
+            error: `Developer Fund spending is not active until block #${quorumInfo.treasuryGovernanceStartHeight} (current spend height: #${quorumInfo.targetHeight})`
           }
         }
 
@@ -486,12 +547,14 @@ export default defineEventHandler(async (event) => {
             proposal.broadcastError = safeErr
             try {
               const decoded = await callRpc('decoderawtransaction', [proposal.rawTxHex])
-              const firstVin = decoded?.vin?.[0]
-              const txOut = firstVin
-                ? await callRpc('gettxout', [firstVin.txid, Number(firstVin.vout), true])
-                : null
-              if (!txOut) {
-                proposal.status = 'failed'
+              const vins = Array.isArray(decoded?.vin) ? decoded.vin : []
+              for (const vin of vins) {
+                if (!vin?.txid || vin.vout === undefined) continue
+                const txOut = await callRpc('gettxout', [vin.txid, Number(vin.vout), true])
+                if (!txOut) {
+                  proposal.status = 'failed'
+                  break
+                }
               }
             } catch {
               // Keep status = 'pending' so quorum members can retry after epoch/sync transition

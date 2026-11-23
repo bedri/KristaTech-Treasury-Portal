@@ -8,7 +8,7 @@ export default defineNuxtConfig({
   modules: ['@nuxt/ui'],
   css: ['~/assets/css/main.css'],
   compatibilityDate: '2025-07-15',
-  devtools: { enabled: process.env.NODE_ENV !== 'production' },
+  devtools: { enabled: process.env.NUXT_ENABLE_DEVTOOLS === 'true' },
   app: {
     head: {
       link: [

@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   SECURITY_HEADERS,
+  buildHtmlCsp,
   ALLOWED_RPC_METHODS,
   isAllowedRpcMethod,
   isAllowedFetchSite,
@@ -16,6 +17,7 @@ import {
   clearRateLimitsForTests,
   acquireProposalLock,
   sanitizeRpcErrorMessage,
+  resolveKristaRpcConfig,
   configureProposalsFileForTests,
   readProposalsAtomically,
   writeProposalsAtomically
@@ -24,22 +26,34 @@ import {
 describe('server/utils/security — HTTP Security Headers & Fetch Metadata Isolation', () => {
   it('defines immutable institutional HTTP security headers', () => {
     assert.equal(Object.isFrozen(SECURITY_HEADERS), true)
+    assert.ok(SECURITY_HEADERS['Content-Security-Policy']?.includes("default-src 'self'"))
+    assert.ok(SECURITY_HEADERS['Content-Security-Policy']?.includes("script-src 'self'"))
+    assert.ok(SECURITY_HEADERS['Content-Security-Policy']?.includes("connect-src 'self'"))
     assert.ok(SECURITY_HEADERS['Content-Security-Policy']?.includes("frame-ancestors 'self'"))
     assert.ok(SECURITY_HEADERS['Content-Security-Policy']?.includes("object-src 'none'"))
     assert.equal(SECURITY_HEADERS['X-Frame-Options'], 'SAMEORIGIN')
     assert.equal(SECURITY_HEADERS['X-Content-Type-Options'], 'nosniff')
     assert.equal(SECURITY_HEADERS['Cross-Origin-Opener-Policy'], 'same-origin-allow-popups')
     assert.equal(SECURITY_HEADERS['Cross-Origin-Resource-Policy'], 'same-origin')
+
+    const prodCsp = buildHtmlCsp('testNonce123==', false)
+    assert.ok(prodCsp.includes("script-src 'self' 'nonce-testNonce123=='"))
+    assert.equal(prodCsp.includes('ws://127.0.0.1:*'), false)
+    const devCsp = buildHtmlCsp('testNonce123==', true)
+    assert.ok(devCsp.includes('ws://127.0.0.1:*'))
   })
 
-  it('enforces Sec-Fetch-Site resource isolation against cross-site requests', () => {
+  it('enforces Sec-Fetch-Site resource isolation against cross-site and mutating same-site requests', () => {
     assert.equal(isAllowedFetchSite(undefined), true)
-    assert.equal(isAllowedFetchSite('same-origin'), true)
-    assert.equal(isAllowedFetchSite('same-site'), true)
-    assert.equal(isAllowedFetchSite('none'), true)
+    assert.equal(isAllowedFetchSite('same-origin', 'POST'), true)
+    assert.equal(isAllowedFetchSite('same-site', 'GET'), true)
+    assert.equal(isAllowedFetchSite('same-site', 'POST'), false)
+    assert.equal(isAllowedFetchSite('none', 'POST'), true)
     assert.equal(isAllowedFetchSite('cross-site', 'POST'), false)
 
     assert.equal(validateFetchMetadata({ 'sec-fetch-site': 'same-origin' }, 'POST').allowed, true)
+    const rejectedSameSitePost = validateFetchMetadata({ 'sec-fetch-site': 'same-site' }, 'POST')
+    assert.equal(rejectedSameSitePost.allowed, false)
     const rejected = validateFetchMetadata({ 'sec-fetch-site': 'cross-site' }, 'POST')
     assert.equal(rejected.allowed, false)
     assert.ok(rejected.reason?.includes('Cross-site request blocked'))
@@ -73,15 +87,15 @@ describe('server/utils/security — Anti-Spoofing IP Resolution, Rate Limiting &
       node: {
         req: {
           socket: { remoteAddress: '127.0.0.1' },
-          headers: { 'x-forwarded-for': '203.0.113.99, 127.0.0.1' }
+          headers: { 'x-forwarded-for': '1.2.3.4, 203.0.113.99, 127.0.0.1' }
         }
       }
     } as any
-    // Trusted local reverse proxy forwarding real client IP -> honored!
+    // Trusted local reverse proxy forwarding real client IP -> ignores spoofed leftmost XFF!
     assert.equal(resolveClientIp(fakeEventTrusted, true), '203.0.113.99')
   })
 
-  it('enforces sliding-window API rate limits per client and bucket', () => {
+  it('enforces sliding-window API rate limits per client and bounds bucket map size', () => {
     assert.equal(checkApiRateLimit('proposals-post', '203.0.113.5', 3, 60_000).allowed, true)
     assert.equal(checkApiRateLimit('proposals-post', '203.0.113.5', 3, 60_000).allowed, true)
     assert.equal(checkApiRateLimit('proposals-post', '203.0.113.5', 3, 60_000).allowed, true)
@@ -90,6 +104,14 @@ describe('server/utils/security — Anti-Spoofing IP Resolution, Rate Limiting &
     assert.equal(fourth.allowed, false)
     assert.equal(fourth.remaining, 0)
     assert.ok(fourth.retryAfterSec > 0)
+
+    // Flood > 10,000 unique client buckets and verify eviction bounds memory without error
+    for (let i = 0; i < 10_050; i++) {
+      const octet3 = (i >> 8) & 0xff
+      const octet4 = i & 0xff
+      checkApiRateLimit('flood-test', `198.51.${octet3}.${octet4}`, 5, 60_000)
+    }
+    assert.equal(checkApiRateLimit('flood-test', '198.51.99.99', 5, 60_000).allowed, true)
   })
 
   it('prevents concurrent proposal mutations via acquireProposalLock (prevents TOCTOU race conditions)', () => {
@@ -109,12 +131,38 @@ describe('server/utils/security — Anti-Spoofing IP Resolution, Rate Limiting &
 
   it('redacts credentials, URLs, and server paths in sanitizeRpcErrorMessage', () => {
     const rawErr = new Error(
-      'Failed to connect to http://admin:supersecret@127.0.0.1:19998/wallet at /home/server/secret/node.dat'
+      'Failed to connect to http://admin:supersecret@127.0.0.1:19998/wallet at /home/server/secret/node.dat and 127.0.0.1:27998 /var/lib/krista/wallet.dat /etc/kristatech/conf'
     )
     const sanitized = sanitizeRpcErrorMessage(rawErr)
     assert.equal(sanitized.includes('supersecret'), false)
     assert.equal(sanitized.includes('127.0.0.1:19998'), false)
+    assert.equal(sanitized.includes('127.0.0.1:27998'), false)
     assert.equal(sanitized.includes('/home/server/secret'), false)
+    assert.equal(sanitized.includes('/var/lib/krista'), false)
+    assert.equal(sanitized.includes('/etc/kristatech'), false)
+  })
+
+  it('rejects non-loopback plaintext HTTP RPC endpoints unless explicitly allowed', () => {
+    const prevUser = process.env.NUXT_RPC_USER
+    const prevPass = process.env.NUXT_RPC_PASSWORD
+    const prevUrl = process.env.NUXT_RPC_URL
+    const prevAllow = process.env.NUXT_ALLOW_INSECURE_REMOTE_RPC
+    try {
+      process.env.NUXT_RPC_USER = 'rpcu'
+      process.env.NUXT_RPC_PASSWORD = 'rpcp'
+      process.env.NUXT_RPC_URL = 'http://203.0.113.10:27998'
+      delete process.env.NUXT_ALLOW_INSECURE_REMOTE_RPC
+      assert.throws(() => resolveKristaRpcConfig(), /non-loopback/i)
+    } finally {
+      if (prevUser === undefined) delete process.env.NUXT_RPC_USER
+      else process.env.NUXT_RPC_USER = prevUser
+      if (prevPass === undefined) delete process.env.NUXT_RPC_PASSWORD
+      else process.env.NUXT_RPC_PASSWORD = prevPass
+      if (prevUrl === undefined) delete process.env.NUXT_RPC_URL
+      else process.env.NUXT_RPC_URL = prevUrl
+      if (prevAllow === undefined) delete process.env.NUXT_ALLOW_INSECURE_REMOTE_RPC
+      else process.env.NUXT_ALLOW_INSECURE_REMOTE_RPC = prevAllow
+    }
   })
 
   it('writes and reads proposals atomically with 0o600 file permissions', async () => {

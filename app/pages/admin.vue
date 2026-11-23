@@ -71,7 +71,9 @@ const computedTxHash = computed(() => {
 })
 
 const cliTemplate = computed(() => {
-  const addr = normalizeTaprootAddress(targetAddress.value.trim()) || '<RECIPIENT_KRISTA_ADDRESS>'
+  const addr = isAddressValid.value
+    ? normalizeTaprootAddress(targetAddress.value.trim())
+    : '<RECIPIENT_KRISTA_ADDRESS>'
   const amt = isAmountValid.value ? Number(amount.value) : '<AMOUNT>'
   const devFundChangeAddr = quorumData.value?.developerFundAddress || '<DEV_FUND_CHANGE_ADDRESS>'
   return [

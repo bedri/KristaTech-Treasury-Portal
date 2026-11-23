@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from '~/composables/useI18n'
 import {
   CORE_VERSION,
@@ -202,6 +202,19 @@ function clearWifKey() {
   showWif.value = false
 }
 
+onMounted(() => {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', clearWifKey)
+  }
+})
+
+onBeforeUnmount(() => {
+  clearWifKey()
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('beforeunload', clearWifKey)
+  }
+})
+
 const wifHasError = computed(() => {
   return wifTouched.value && wifKey.value.trim().length > 0 && !derivedWallet.value
 })
@@ -355,6 +368,8 @@ async function signProposal(proposal: ProposalItem) {
     if (!res?.success) {
       throw new Error(res?.error || t('toastSignErrorTitle'))
     }
+
+    clearWifKey()
 
     toast.add({
       title: t('toastSignSuccessTitle'),
@@ -741,7 +756,7 @@ async function signProposal(proposal: ProposalItem) {
             </span>
             <div class="text-xs space-y-1">
               <p class="font-bold text-emerald-400">
-                {{ t('quorumMatchedTitle') }} ({{ matchedQuorumMember.ip || matchedQuorumMember.addr || 'On-Chain MN' }})
+                {{ t('quorumMatchedTitle') }} ({{ matchedQuorumMember.ip || 'On-Chain MN' }})
               </p>
               <p class="text-[var(--krista-text-muted)]">
                 {{ t('quorumMatchedDesc') }}
@@ -1009,7 +1024,7 @@ async function signProposal(proposal: ProposalItem) {
                     #{{ node.rank ?? idx + 1 }}
                   </td>
                   <td class="py-3 px-3 font-mono font-semibold text-[var(--krista-text)]">
-                    {{ node.ip || node.addr || 'On-Chain MN' }}
+                    {{ node.ip || 'On-Chain MN' }}
                   </td>
                   <td class="py-3 px-3 font-mono text-[var(--krista-text-muted)]">
                     <div class="flex items-center gap-1.5">

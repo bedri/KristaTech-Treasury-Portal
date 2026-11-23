@@ -26,6 +26,7 @@ function doubleSha256(buf: Buffer): Buffer {
 // Bounded cache for seeds: height (number) -> seed (Buffer)
 const MAX_SEED_CACHE_ENTRIES = 2000
 const seedCache = new Map<number, Buffer>()
+const inFlightSeedPromises = new Map<number, Promise<Buffer>>()
 
 function setSeedCacheBounded(height: number, seed: Buffer) {
   if (seedCache.size >= MAX_SEED_CACHE_ENTRIES && !seedCache.has(height)) {
@@ -37,9 +38,7 @@ function setSeedCacheBounded(height: number, seed: Buffer) {
   seedCache.set(height, seed)
 }
 
-async function getAdamSeed(height: number): Promise<Buffer> {
-  const safeHeight = Math.max(0, Math.floor(height))
-
+async function computeAdamSeed(safeHeight: number): Promise<Buffer> {
   // If height < 200, ADAM is not active, return the block hash of that height as seed
   if (safeHeight < 200) {
     const blockHash = await callRpc('getblockhash', [safeHeight])
@@ -93,6 +92,22 @@ async function getAdamSeed(height: number): Promise<Buffer> {
   }
 
   return currentSeed
+}
+
+async function getAdamSeed(height: number): Promise<Buffer> {
+  const safeHeight = Math.max(0, Math.floor(height))
+  if (safeHeight >= 200 && seedCache.has(safeHeight)) {
+    return seedCache.get(safeHeight)!
+  }
+  const existing = inFlightSeedPromises.get(safeHeight)
+  if (existing) {
+    return existing
+  }
+  const promise = computeAdamSeed(safeHeight).finally(() => {
+    inFlightSeedPromises.delete(safeHeight)
+  })
+  inFlightSeedPromises.set(safeHeight, promise)
+  return promise
 }
 
 export default defineEventHandler(async (event) => {
@@ -156,14 +171,14 @@ export default defineEventHandler(async (event) => {
     let dkgHeight = fRotationActive ? targetHeight : epochHeight
     let seedHeight = Math.min(currentHeight, Math.max(0, epochHeight - 1))
 
-    const seedBuffer = await getAdamSeed(seedHeight)
-    let seedHex = Buffer.from(seedBuffer).reverse().toString('hex')
+    let seedBuffer: Buffer | null = null
+    let seedHex = ''
 
     let developerFundAddress = defaults.devFundAddr
     let sporkPubKey = defaults.sporkPubKey
     let quorumHash: string | undefined
 
-    // Optionally enrich metadata from getactivequorum while strictly verifying members against live listmasternodes
+    // Query getactivequorum FIRST so warm daemon RPC eliminates cold-start getAdamSeed amplification
     let activeQuorum: any = null
     try {
       activeQuorum = await callRpc('getactivequorum', [targetHeight])
@@ -195,7 +210,12 @@ export default defineEventHandler(async (event) => {
         }
       }
     } catch {
-      // Older daemon without getactivequorum or temporary error; live values computed above are used
+      // Older daemon without getactivequorum or temporary error; fallback seed calculation runs below
+    }
+
+    if (!seedHex) {
+      seedBuffer = await getAdamSeed(seedHeight)
+      seedHex = Buffer.from(seedBuffer).reverse().toString('hex')
     }
 
     // Build Active Quorum Members strictly from live active Masternodes (enabledMns)
@@ -244,13 +264,16 @@ export default defineEventHandler(async (event) => {
       if (verifiedFromRpc.length > 0 && Array.isArray(activeQuorum?.members)) {
         selectedMns = verifiedFromRpc.slice(0, targetQuorumSize)
       } else {
-        // Compute deterministic VRF/ADAM score for each live active Masternode
+        // Compute deterministic VRF/ADAM score for each live active Masternode using RPC seed or fallback seed
+        const scoringSeedBuffer =
+          seedBuffer ??
+          (seedHex ? Buffer.from(seedHex, 'hex').reverse() : await getAdamSeed(seedHeight))
         const scoredMns = enabledMns.map((mn: any) => {
           const txhashBytes = Buffer.from(String(mn.txhash), 'hex').reverse()
           const outidxBytes = Buffer.alloc(4)
           outidxBytes.writeUInt32LE(parseInt(String(mn.outidx), 10) >>> 0, 0)
 
-          const data = Buffer.concat([seedBuffer, txhashBytes, outidxBytes])
+          const data = Buffer.concat([scoringSeedBuffer, txhashBytes, outidxBytes])
           const score = doubleSha256(data).reverse().toString('hex')
 
           const livePk = String(mn.pubkey || '').trim()

@@ -110,6 +110,20 @@ describe('Markup, Brand Identity, Accessibility & XSS Surface Audit', () => {
     assert.equal(layoutVue.includes('KristaTech/Krista-Core'), false, 'default.vue must not use stale Krista-Core repo link')
     assert.ok(appVue.includes("name: 'color-scheme'"), 'app.vue must declare color-scheme meta tag')
 
+    const pkgJson = await readProjectFile('package.json')
+    const treasuryCryptoTs = await readProjectFile('app/utils/treasuryCrypto.ts')
+    const gitignore = await readProjectFile('.gitignore')
+    const nuxtConfig = await readProjectFile('nuxt.config.ts')
+    assert.equal(pkgJson.includes('"elliptic"'), false, 'package.json must not depend on unmaintained elliptic')
+    assert.equal(/from ['"]elliptic['"]/.test(treasuryCryptoTs), false, 'treasuryCrypto.ts must not import elliptic')
+    assert.ok(gitignore.includes('proposals.json'), '.gitignore must ignore proposals.json')
+    assert.equal(
+      nuxtConfig.includes("NODE_ENV !== 'production'"),
+      false,
+      'nuxt.config.ts must not unconditionally enable devtools'
+    )
+    assert.ok(nuxtConfig.includes("NUXT_ENABLE_DEVTOOLS === 'true'"), 'nuxt.config.ts must gate devtools on NUXT_ENABLE_DEVTOOLS')
+
     // Ensure no gradient text classes or background-clip: text remain
     const indexVue = await readProjectFile('app/pages/index.vue')
     const adminVue = await readProjectFile('app/pages/admin.vue')
