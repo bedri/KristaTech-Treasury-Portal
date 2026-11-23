@@ -6,6 +6,7 @@ import {
   PROTOCOL_VERSION,
   blsPubKeysMatch,
   deriveBlsPubKeyFromSecret,
+  deriveDip3BlsKeyFromEcdsaPrivKey,
   derivePubKeysFromWIF,
   getQuorumMajorityThreshold,
   pubkeysMatch,
@@ -19,6 +20,8 @@ interface QuorumMember {
   outidx: number
   pubkey: string
   operatorPubKey?: string
+  proTxHash?: string
+  registeredHeight?: number
   dip3?: boolean
   addr?: string
   status?: string
@@ -39,7 +42,12 @@ interface QuorumResponse {
   developerFundAddress?: string
   sporkPubKey?: string
   treasuryGovernanceStartHeight?: number
+  treasuryGovernanceActive?: boolean
+  dip3Active?: boolean
+  fairnessActive?: boolean
   activeMasternodeCount?: number
+  dip3MasternodeCount?: number
+  poseBannedCount?: number
   totalMasternodeCount?: number
   targetQuorumSize?: number
   threshold?: number
@@ -116,9 +124,11 @@ const derivedWallet = computed(() => {
       }
     }
     const wif = derivePubKeysFromWIF(clean)
+    const derivedDip3Bls = deriveDip3BlsKeyFromEcdsaPrivKey(wif.privKeyHex)
     return {
       mode: 'wif' as const,
-      ...wif
+      ...wif,
+      derivedDip3Bls
     }
   } catch {
     return null
@@ -133,7 +143,32 @@ const matchedQuorumMember = computed<QuorumMember | null>(() => {
       if (blsPubKeysMatch(derivedWallet.value.blsPubKeyHex, candidateOp)) {
         return member
       }
+    } else if (member.operatorPubKey) {
+      if (blsPubKeysMatch(derivedWallet.value.derivedDip3Bls.blsPubKeyHex, member.operatorPubKey)) {
+        return member
+      }
     } else if (pubkeysMatch(derivedWallet.value.compressedPubKey, member.pubkey)) {
+      return member
+    }
+  }
+  return null
+})
+
+const matchedColdOwnerOnlyMember = computed<QuorumMember | null>(() => {
+  if (
+    !derivedWallet.value ||
+    derivedWallet.value.mode !== 'wif' ||
+    matchedQuorumMember.value ||
+    quorumMembers.value.length === 0
+  ) {
+    return null
+  }
+  for (const member of quorumMembers.value) {
+    if (
+      member.operatorPubKey &&
+      !/^[0-9a-fA-F]{96}$/.test(String(member.pubkey || '').trim()) &&
+      pubkeysMatch(derivedWallet.value.compressedPubKey, member.pubkey)
+    ) {
       return member
     }
   }
@@ -248,12 +283,19 @@ async function signProposal(proposal: ProposalItem) {
     const cleanWif = wifKey.value.trim()
     let wallet:
       | ({ mode: 'bls-operator' } & ReturnType<typeof deriveBlsPubKeyFromSecret>)
-      | ({ mode: 'wif' } & ReturnType<typeof derivePubKeysFromWIF>)
+      | ({ mode: 'wif'; derivedDip3Bls: ReturnType<typeof deriveDip3BlsKeyFromEcdsaPrivKey> } & ReturnType<
+          typeof derivePubKeysFromWIF
+        >)
     try {
       if (/^[0-9a-fA-F]{64}$/.test(cleanWif)) {
         wallet = { mode: 'bls-operator', ...deriveBlsPubKeyFromSecret(cleanWif) }
       } else {
-        wallet = { mode: 'wif', ...derivePubKeysFromWIF(cleanWif) }
+        const wif = derivePubKeysFromWIF(cleanWif)
+        wallet = {
+          mode: 'wif',
+          ...wif,
+          derivedDip3Bls: deriveDip3BlsKeyFromEcdsaPrivKey(wif.privKeyHex)
+        }
       }
     } catch {
       wifTouched.value = true
@@ -276,6 +318,21 @@ async function signProposal(proposal: ProposalItem) {
       }
       signedDataHex = createOperatorBLSSignedData(wallet.blsSecretHex, proposal.txHash).signedDataHex
       signerPubkey = candidateOp
+    } else if (activeNode.operatorPubKey) {
+      if (!blsPubKeysMatch(wallet.derivedDip3Bls.blsPubKeyHex, activeNode.operatorPubKey)) {
+        if (
+          !/^[0-9a-fA-F]{96}$/.test(String(activeNode.pubkey || '').trim()) &&
+          pubkeysMatch(wallet.compressedPubKey, activeNode.pubkey)
+        ) {
+          throw new Error(t('quorumDip3NeedsOperatorKeyDesc'))
+        }
+        throw new Error(t('toastKeyMismatch'))
+      }
+      signedDataHex = createOperatorBLSSignedData(
+        wallet.derivedDip3Bls.blsSecretHex,
+        proposal.txHash
+      ).signedDataHex
+      signerPubkey = activeNode.operatorPubKey
     } else {
       if (!pubkeysMatch(wallet.compressedPubKey, activeNode.pubkey)) {
         throw new Error(t('toastKeyMismatch'))
@@ -341,6 +398,13 @@ async function signProposal(proposal: ProposalItem) {
               class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-[#7695CD]/10 text-[#7695CD] border border-[#7695CD]/30"
             >
               Core {{ quorumData?.coreVersion || CORE_VERSION }} &bull; Proto {{ quorumData?.protocolVersion || PROTOCOL_VERSION }}
+            </span>
+
+            <span
+              v-if="quorumData?.dip3Active || quorumData?.fairnessActive"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+            >
+              {{ t('dip3BadgeLabel') }}
             </span>
 
             <span
@@ -614,6 +678,8 @@ async function signProposal(proposal: ProposalItem) {
                 v-model="wifKey"
                 :type="showWif ? 'text' : 'password'"
                 autocomplete="off"
+                autocorrect="off"
+                autocapitalize="none"
                 spellcheck="false"
                 :placeholder="t('wifInputPlaceholder')"
                 aria-describedby="verifier-wif-hint verifier-wif-error"
@@ -625,6 +691,7 @@ async function signProposal(proposal: ProposalItem) {
 
               <button
                 type="button"
+                :aria-pressed="showWif"
                 :aria-label="showWif ? t('wifHidePassword') : t('wifShowPassword')"
                 :title="showWif ? t('wifHidePassword') : t('wifShowPassword')"
                 class="px-3 py-2 rounded-lg border border-[var(--krista-border)] bg-[var(--krista-bg-elevated)] text-xs font-semibold text-[var(--krista-text-muted)] hover:text-[var(--krista-text)] cursor-pointer"
@@ -678,6 +745,37 @@ async function signProposal(proposal: ProposalItem) {
               </p>
               <p class="text-[var(--krista-text-muted)]">
                 {{ t('quorumMatchedDesc') }}
+              </p>
+            </div>
+          </div>
+
+          <div
+            v-else-if="matchedColdOwnerOnlyMember"
+            role="status"
+            class="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/35 flex items-start gap-3"
+          >
+            <span class="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 shrink-0 mt-0.5">
+              <svg
+                aria-hidden="true"
+                class="w-4 h-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+            </span>
+            <div class="text-xs space-y-1">
+              <p class="font-bold text-amber-400">
+                {{ t('quorumDip3NeedsOperatorKeyTitle') }}
+              </p>
+              <p class="text-[var(--krista-text-muted)]">
+                {{ t('quorumDip3NeedsOperatorKeyDesc') }}
               </p>
             </div>
           </div>
@@ -764,25 +862,48 @@ async function signProposal(proposal: ProposalItem) {
 
           <div
             v-if="quorumData?.treasuryGovernanceStartHeight"
-            class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60"
+            class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60 gap-2"
           >
             <dt class="text-[var(--krista-text-muted)]">{{ t('governanceStartHeight') }}</dt>
-            <dd class="font-mono font-semibold text-emerald-400">
-              #{{ quorumData.treasuryGovernanceStartHeight }}
+            <dd class="font-mono font-semibold flex items-center gap-2">
+              <span
+                class="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+                :class="
+                  quorumData.treasuryGovernanceActive
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                    : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                "
+              >
+                {{
+                  quorumData.treasuryGovernanceActive
+                    ? t('governanceStatusActive')
+                    : `${t('governanceStatusPending')} (${Math.max(0, quorumData.treasuryGovernanceStartHeight - (quorumData.targetHeight ?? (quorumData.currentHeight ?? 0) + 1))} ${t('governanceBlocksRemaining')})`
+                }}
+              </span>
+              <span :class="quorumData.treasuryGovernanceActive ? 'text-emerald-400' : 'text-amber-400'">
+                #{{ quorumData.treasuryGovernanceStartHeight }}
+              </span>
             </dd>
           </div>
 
           <div class="flex items-center justify-between py-1.5 border-b border-[var(--krista-border)]/60">
             <dt class="text-[var(--krista-text-muted)]">{{ t('liveMasternodesLabel') }}</dt>
-            <dd
-              class="font-mono font-bold"
-              :class="
-                (quorumData?.activeMasternodeCount ?? quorumMembers.length) > 0
-                  ? 'text-emerald-400'
-                  : 'text-amber-400'
-              "
-            >
-              {{ quorumData?.activeMasternodeCount ?? quorumMembers.length }}
+            <dd class="font-mono font-bold flex items-center gap-2">
+              <span
+                v-if="(quorumData?.poseBannedCount ?? 0) > 0"
+                class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30"
+              >
+                PoSe: {{ quorumData?.poseBannedCount }}
+              </span>
+              <span
+                :class="
+                  (quorumData?.activeMasternodeCount ?? quorumMembers.length) > 0
+                    ? 'text-emerald-400'
+                    : 'text-amber-400'
+                "
+              >
+                {{ quorumData?.activeMasternodeCount ?? quorumMembers.length }}
+              </span>
             </dd>
           </div>
         </dl>
@@ -904,16 +1025,42 @@ async function signProposal(proposal: ProposalItem) {
                     </div>
                   </td>
                   <td class="py-3 px-3 font-mono text-[var(--krista-text-muted)]">
-                    <div v-if="node.pubkey" class="flex items-center gap-1.5">
-                      <span>{{ node.pubkey.slice(0, 10) }}...{{ node.pubkey.slice(-6) }}</span>
-                      <button
-                        type="button"
-                        :title="t('copyBtn')"
-                        class="text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
-                        @click="copyText(node.pubkey)"
+                    <div v-if="node.operatorPubKey || node.pubkey" class="space-y-1">
+                      <div class="flex items-center gap-1.5">
+                        <span
+                          v-if="node.operatorPubKey"
+                          class="px-1 py-0.5 rounded text-[9px] font-bold bg-[#7695CD]/15 text-[#7695CD]"
+                        >
+                          BLS
+                        </span>
+                        <span>
+                          {{ (node.operatorPubKey || node.pubkey).slice(0, 10) }}...{{
+                            (node.operatorPubKey || node.pubkey).slice(-6)
+                          }}
+                        </span>
+                        <button
+                          type="button"
+                          :title="t('copyBtn')"
+                          class="text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+                          @click="copyText(node.operatorPubKey || node.pubkey)"
+                        >
+                          ⧉
+                        </button>
+                      </div>
+                      <div
+                        v-if="node.proTxHash"
+                        class="flex items-center gap-1.5 text-[10px] text-[var(--krista-text-muted)]/80"
                       >
-                        ⧉
-                      </button>
+                        <span>ProTx: {{ node.proTxHash.slice(0, 8) }}...{{ node.proTxHash.slice(-6) }}</span>
+                        <button
+                          type="button"
+                          :title="t('copyBtn')"
+                          class="text-[#7695CD] hover:text-[#F5897C] cursor-pointer"
+                          @click="copyText(node.proTxHash)"
+                        >
+                          ⧉
+                        </button>
+                      </div>
                     </div>
                     <span v-else>-</span>
                   </td>
@@ -1262,7 +1409,7 @@ async function signProposal(proposal: ProposalItem) {
                     :key="getMemberKey(node)"
                     :value="getMemberKey(node)"
                   >
-                    #{{ node.rank ?? nIdx + 1 }} — {{ node.ip || node.addr || 'On-Chain MN' }} ({{ node.txhash.slice(0, 12) }}...:{{ node.outidx }})
+                    #{{ node.rank ?? nIdx + 1 }} — {{ node.ip || 'On-Chain MN' }} ({{ node.txhash.slice(0, 12) }}...:{{ node.outidx }})
                   </option>
                 </select>
               </div>
@@ -1279,6 +1426,8 @@ async function signProposal(proposal: ProposalItem) {
                   v-model="wifKey"
                   :type="showWif ? 'text' : 'password'"
                   autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="none"
                   spellcheck="false"
                   :placeholder="t('wifInputPlaceholder')"
                   class="krista-input w-full px-3 py-2 rounded-xl text-xs font-mono bg-[var(--krista-surface)] text-[var(--krista-text)] border border-[var(--krista-border)] focus:outline-none"

@@ -69,7 +69,9 @@ async function fetchActiveQuorumForSpend() {
       ...liveMn,
       ...m,
       pubkey,
-      operatorPubKey: operatorPubKey || undefined
+      operatorPubKey: operatorPubKey || undefined,
+      proTxHash: liveMn.proTxHash || m.proTxHash || undefined,
+      ip: liveMn.ip || m.ip
     })
   }
 
@@ -78,7 +80,9 @@ async function fetchActiveQuorumForSpend() {
     currentHeight,
     targetHeight,
     treasuryGovernanceStartHeight: Number(
-      activeQuorum?.treasuryGovernanceStartHeight ?? defaults.treasuryGovernanceStartHeight
+      activeQuorum?.treasuryGovernanceStartHeight ??
+        blockChainInfo?.upgrades?.['Treasury Governance']?.activationheight ??
+        defaults.treasuryGovernanceStartHeight
     ),
     threshold: Number(
       activeQuorum?.threshold || getQuorumMajorityThreshold(members.length || 5)

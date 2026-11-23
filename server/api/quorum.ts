@@ -117,12 +117,20 @@ export default defineEventHandler(async (event) => {
     const targetHeight = currentHeight + 1 // CheckInputs & ConnectBlock verify at nSpendHeight = H + 1
     const chain = String(blockChainInfo.chain || 'main')
     const defaults = CHAIN_DEFAULTS[chain] || CHAIN_DEFAULTS.main!
+    const upgrades =
+      blockChainInfo && typeof blockChainInfo.upgrades === 'object' && blockChainInfo.upgrades
+        ? blockChainInfo.upgrades
+        : {}
 
     // Filter live on-chain Masternodes from listmasternodes (never fabricate synthetic MNs from PoW miners)
     const allMns = Array.isArray(rawMns) ? rawMns : []
     const enabledMns = allMns.filter(
       (mn: any) => mn.status === 'ENABLED' || mn.status === 'ACTIVE'
     )
+    const dip3MasternodeCount = enabledMns.filter((mn: any) =>
+      Boolean(mn.dip3 || mn.proTxHash || /^[0-9a-fA-F]{96}$/.test(String(mn.pubkey || '').trim()))
+    ).length
+    const poseBannedCount = allMns.filter((mn: any) => mn.status === 'POSE_BANNED').length
 
     const liveMnByOutpoint = new Map<string, any>()
     for (const mn of enabledMns) {
@@ -222,8 +230,10 @@ export default defineEventHandler(async (event) => {
               ...m,
               pubkey,
               operatorPubKey: operatorPubKey || undefined,
+              proTxHash: liveMn.proTxHash || m.proTxHash || undefined,
+              registeredHeight: liveMn.registeredHeight,
               dip3: Boolean(liveMn.proTxHash || m.proTxHash || operatorPubKey),
-              ip: liveMn.ip || liveMn.addr || m.ip,
+              ip: liveMn.ip || m.ip,
               addr: liveMn.addr || m.addr,
               status: liveMn.status || 'ENABLED'
             })
@@ -274,8 +284,23 @@ export default defineEventHandler(async (event) => {
     const quorumMembers = selectedMns.map((mn: any, idx: number) => ({
       ...mn,
       rank: idx + 1,
-      ip: maskIpAddress(mn.ip || mn.addr)
+      ip: maskIpAddress(mn.ip)
     }))
+
+    const treasuryGovernanceStartHeight = Number(
+      activeQuorum?.treasuryGovernanceStartHeight ??
+        upgrades['Treasury Governance']?.activationheight ??
+        defaults.treasuryGovernanceStartHeight
+    )
+    const treasuryGovernanceActive = targetHeight >= treasuryGovernanceStartHeight
+    const dip3Active = upgrades.DIP3
+      ? upgrades.DIP3.status === 'active'
+      : upgrades['KTDIP3 v2']
+        ? upgrades['KTDIP3 v2'].status === 'active'
+        : targetHeight >= 1
+    const fairnessActive = upgrades.Fairness
+      ? upgrades.Fairness.status === 'active'
+      : targetHeight >= 1
 
     return {
       success: true,
@@ -290,10 +315,13 @@ export default defineEventHandler(async (event) => {
       seed: seedHex,
       developerFundAddress,
       sporkPubKey,
-      treasuryGovernanceStartHeight: Number(
-        activeQuorum?.treasuryGovernanceStartHeight ?? defaults.treasuryGovernanceStartHeight
-      ),
+      treasuryGovernanceStartHeight,
+      treasuryGovernanceActive,
+      dip3Active,
+      fairnessActive,
       activeMasternodeCount: enabledMns.length,
+      dip3MasternodeCount,
+      poseBannedCount,
       totalMasternodeCount: allMns.length,
       targetQuorumSize,
       threshold: Number(

@@ -1,5 +1,6 @@
 import elliptic from 'elliptic'
 import { bls12_381 } from '@noble/curves/bls12-381'
+import { extract as hkdfExtract, expand as hkdfExpand } from '@noble/hashes/hkdf'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
 
@@ -652,6 +653,64 @@ export function deriveBlsPubKeyFromSecret(blsSecretHex: string): {
 }
 
 /**
+ * Deterministically derives the default KTDIP3 32-byte BLS12-381 operator keypair from
+ * a 32-byte secp256k1 private key using IETF BLS Draft v4 HKDF-SHA256 (blst_keygen),
+ * matching DeriveBLSFromCKey in src/crypto/bls.cpp:235-255. Zeroes ephemeral buffers.
+ */
+export function deriveDip3BlsKeyFromEcdsaPrivKey(privKeyHex: string): {
+  blsSecretHex: string
+  blsPubKeyHex: string
+} {
+  const privKeyBytes = hexToBytes(privKeyHex)
+  if (privKeyBytes.length !== 32) {
+    privKeyBytes.fill(0)
+    throw new Error('Private key must be 32 bytes')
+  }
+
+  const ikm = concatBytes(privKeyBytes, new Uint8Array([0x00]))
+  const info = new Uint8Array([0x00, 0x30]) // I2OSP(48, 2)
+  let salt: Uint8Array = sha256(new TextEncoder().encode('BLS-SIG-KEYGEN-SALT-'))
+  let blsSecretHex = ''
+
+  try {
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const prk = hkdfExtract(sha256, ikm, salt)
+      const okm = hkdfExpand(sha256, prk, info, 48)
+      try {
+        const skBigInt = BigInt('0x' + bytesToHex(okm)) % bls12_381.params.r
+        if (skBigInt !== 0n) {
+          blsSecretHex = skBigInt.toString(16).padStart(64, '0')
+          break
+        }
+      } finally {
+        prk.fill(0)
+        okm.fill(0)
+      }
+      salt = sha256(salt)
+    }
+
+    if (!blsSecretHex) {
+      throw new Error('Failed to derive non-zero BLS12-381 scalar via blst_keygen')
+    }
+
+    const secretBytes = hexToBytes(blsSecretHex)
+    try {
+      const pubBytes = bls12_381.getPublicKey(secretBytes)
+      return {
+        blsSecretHex,
+        blsPubKeyHex: bytesToHex(pubBytes)
+      }
+    } finally {
+      secretBytes.fill(0)
+    }
+  } finally {
+    privKeyBytes.fill(0)
+    ikm.fill(0)
+    salt.fill(0)
+  }
+}
+
+/**
  * Builds a KTDIP3 pure operator CBLSSignedData (48B blsPubKey + 96B blsSig + 0x00, 145 bytes)
  * matching SignBLSOperatorOnly / CQuorumSignature::Verify in src/llmq.cpp.
  */
@@ -711,27 +770,41 @@ export function verifyAndParseBLSSignedData(
       return { valid: false, error: 'Malformed CBLSSignedData compactSize for ecdsaSig' }
     }
 
+    const sigBlsPkHex = bytesToHex(blsPubKey)
+    const expectedOperatorPk =
+      (operatorPubKeyHex && /^[0-9a-fA-F]{96}$/.test(operatorPubKeyHex.trim())
+        ? operatorPubKeyHex.trim()
+        : '') ||
+      (/^[0-9a-fA-F]{96}$/.test(memberPubkeyHex.trim()) ? memberPubkeyHex.trim() : '')
+
     let mode: 'dip3-operator' | 'hybrid'
-    if (ecdsaLenInfo.value === 0) {
-      // KTDIP3 Pure Operator-Only BLS mode (145 bytes)
-      mode = 'dip3-operator'
-      const sigBlsPkHex = bytesToHex(blsPubKey)
-      const expectedOperatorPk =
-        (operatorPubKeyHex && /^[0-9a-fA-F]{96}$/.test(operatorPubKeyHex.trim())
-          ? operatorPubKeyHex.trim()
-          : '') ||
-        (/^[0-9a-fA-F]{96}$/.test(memberPubkeyHex.trim()) ? memberPubkeyHex.trim() : '')
-      if (!expectedOperatorPk) {
-        return {
-          valid: false,
-          error: 'KTDIP3 operator-only BLS signature requires registered 48B BLS operator public key'
-        }
-      }
+    if (expectedOperatorPk) {
+      // KTDIP3 consensus (VerifyAdamOrDip3Signature -> VerifyDip3OperatorBLS) requires registered 48B BLS operator key
       if (!blsPubKeysMatch(sigBlsPkHex, expectedOperatorPk)) {
         return {
           valid: false,
-          error: 'BLS operator public key does not match registered KTDIP3 masternode operator key'
+          error:
+            ecdsaLenInfo.value > 0
+              ? 'KTDIP3 masternode requires signature from registered 48B BLS operator key (not an ephemeral WIF key)'
+              : 'BLS operator public key does not match registered KTDIP3 masternode operator key'
         }
+      }
+      if (ecdsaLenInfo.value > 0 && !/^[0-9a-fA-F]{96}$/.test(memberPubkeyHex.trim())) {
+        const ecdsaSig = sigBuf.subarray(144 + ecdsaLenInfo.size, expectedTotal)
+        const hashPubKey = doubleSha256Bytes(blsPubKey)
+        const key = ec.keyFromPublic(memberPubkeyHex.trim(), 'hex')
+        if (!key.verify(hashPubKey, ecdsaSig)) {
+          return {
+            valid: false,
+            error: 'Invalid Masternode ECDSA authorization signature over Hash(blsPubKey)'
+          }
+        }
+      }
+      mode = 'dip3-operator'
+    } else if (ecdsaLenInfo.value === 0) {
+      return {
+        valid: false,
+        error: 'KTDIP3 operator-only BLS signature requires registered 48B BLS operator public key'
       }
     } else {
       // Legacy / Hybrid BLS12-381 + ECDSA mode (vchEcdsaSig non-empty)
@@ -873,8 +946,19 @@ export function injectQuorumSigIntoRawTxBytes(
 export function maskIpAddress(ip: string | undefined): string {
   if (!ip) return 'On-Chain MN'
   const trimmed = String(ip).trim()
-  if (!trimmed || trimmed === 'On-Chain MN' || trimmed.startsWith('ADAM-Miner')) {
-    return trimmed || 'On-Chain MN'
+  if (!trimmed) return 'On-Chain MN'
+  if (trimmed.startsWith('ADAM-Miner')) return trimmed
+  if (
+    trimmed === 'On-Chain MN' ||
+    trimmed === '0.0.0.0:0' ||
+    trimmed === '0.0.0.0' ||
+    trimmed === '[::]:0' ||
+    trimmed === '::'
+  ) {
+    return 'On-Chain MN'
+  }
+  if (!trimmed.includes('.') && !trimmed.includes(':')) {
+    return 'On-Chain MN'
   }
   const lastColon = trimmed.lastIndexOf(':')
   const isIpv6Bracket = trimmed.startsWith('[')

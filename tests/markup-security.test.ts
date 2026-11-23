@@ -95,15 +95,25 @@ describe('Markup, Brand Identity, Accessibility & XSS Surface Audit', () => {
     assert.ok(mainCss.includes('scrollbar-gutter: stable'), 'main.css must reserve scrollbar-gutter')
     assert.ok(mainCss.includes('@supports not (accent-color: #7695CD)'), 'main.css must include @supports not accent-color fallback')
     assert.ok(mainCss.includes('@supports not (scrollbar-color: auto)'), 'main.css must include @supports not scrollbar-color fallback')
+    assert.ok(
+      /@supports not \(scrollbar-color:\s*auto\)\s*\{[^}]*\.custom-scroll\s*\{[^}]*scrollbar-width:\s*auto;/.test(mainCss),
+      'main.css must reset .custom-scroll scrollbar-width: auto inside @supports not (scrollbar-color: auto)'
+    )
 
     assert.ok(layoutVue.includes('id="main-content"'), 'default.vue must include #main-content')
     assert.ok(layoutVue.includes('tabindex="-1"'), 'default.vue main landmark must be focusable')
     assert.ok(layoutVue.includes('href="#main-content"'), 'default.vue must include skip-link')
+    assert.ok(layoutVue.includes('https://krista.kristalteknoloji.com'), 'default.vue must link to krista.kristalteknoloji.com')
+    assert.ok(layoutVue.includes('https://explorer.kristalteknoloji.com'), 'default.vue must link to explorer.kristalteknoloji.com')
+    assert.ok(layoutVue.includes('https://github.com/bedri/KristaTech-KRISTA'), 'default.vue must link to bedri/KristaTech-KRISTA')
+    assert.equal(layoutVue.includes('https://krista.tech'), false, 'default.vue must not use stale krista.tech link')
+    assert.equal(layoutVue.includes('KristaTech/Krista-Core'), false, 'default.vue must not use stale Krista-Core repo link')
     assert.ok(appVue.includes("name: 'color-scheme'"), 'app.vue must declare color-scheme meta tag')
 
     // Ensure no gradient text classes or background-clip: text remain
     const indexVue = await readProjectFile('app/pages/index.vue')
     const adminVue = await readProjectFile('app/pages/admin.vue')
+    assert.ok(indexVue.includes(':aria-pressed="showWif"'), 'index.vue WIF visibility toggle must expose :aria-pressed="showWif"')
     for (const [name, src] of [
       ['main.css', mainCss],
       ['default.vue', layoutVue],

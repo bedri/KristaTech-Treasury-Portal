@@ -26,6 +26,7 @@ import {
   computeSighashAllBytes,
   verifySporkInputSignature,
   deriveBlsPubKeyFromSecret,
+  deriveDip3BlsKeyFromEcdsaPrivKey,
   createOperatorBLSSignedData,
   createHybridBLSSignedData,
   verifyAndParseBLSSignedData,
@@ -114,6 +115,9 @@ describe('treasuryCrypto — Encoding, WIF & Address Validation', () => {
     assert.equal(maskIpAddress('185.122.44.91:19999'), '185.xxx.xxx.91:19999')
     assert.equal(maskIpAddress('10.0.0.1'), '10.xxx.xxx.1')
     assert.equal(maskIpAddress(''), 'On-Chain MN')
+    assert.equal(maskIpAddress('0.0.0.0:0'), 'On-Chain MN')
+    assert.equal(maskIpAddress('[::]:0'), 'On-Chain MN')
+    assert.equal(maskIpAddress('KTeRC2Kj8hXcuzRohxPp2LtYFRJm2BceRoP'), 'On-Chain MN')
   })
 
   it('enforces Krista Core v1.5.9.0 (Proto 70983) dynamic LLMQ scaling (5->9->11->15), majority thresholds, and governance start heights', () => {
@@ -363,6 +367,42 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
         { pubkey: ownerPk, operatorPubKey: op1.blsPubKeyHex, signature: sig1.signedDataHex },
         { pubkey: ownerPk, operatorPubKey: op1.blsPubKeyHex, signature: sig1.signedDataHex }
       ]).valid,
+      false
+    )
+
+    // Core DeriveBLSFromCKey (blst_keygen HKDF) derives deterministic KTDIP3 operator BLS key from ECDSA privkey
+    const mnWif = createTestWif(0x61, true, 0x80)
+    const mnKeys = derivePubKeysFromWIF(mnWif)
+    const derivedOp = deriveDip3BlsKeyFromEcdsaPrivKey(mnKeys.privKeyHex)
+    assert.equal(derivedOp.blsSecretHex.length, 64)
+    assert.equal(derivedOp.blsPubKeyHex.length, 96)
+    assert.equal(deriveDip3BlsKeyFromEcdsaPrivKey(mnKeys.privKeyHex).blsPubKeyHex, derivedOp.blsPubKeyHex)
+
+    // Operator BLS signature using derived KTDIP3 key passes verification against registered operatorPubKey
+    const derivedOpSig = createOperatorBLSSignedData(derivedOp.blsSecretHex, txHash)
+    assert.equal(derivedOpSig.blsPubKeyHex, derivedOp.blsPubKeyHex)
+    const derivedCheck = verifyAndParseBLSSignedData(
+      derivedOpSig.signedDataHex,
+      txHash,
+      mnKeys.compressedPubKey,
+      derivedOp.blsPubKeyHex
+    )
+    assert.equal(derivedCheck.valid, true)
+    assert.equal(derivedCheck.mode, 'dip3-operator')
+
+    // Hybrid ephemeral-BLS signature passes for legacy non-DIP3 member, but MUST be rejected for KTDIP3 member with registered operatorPubKey
+    const hybridSig = createHybridBLSSignedData(mnKeys.privKeyHex, txHash)
+    assert.equal(
+      verifyAndParseBLSSignedData(hybridSig.signedDataHex, txHash, mnKeys.compressedPubKey).valid,
+      true
+    )
+    assert.equal(
+      verifyAndParseBLSSignedData(
+        hybridSig.signedDataHex,
+        txHash,
+        mnKeys.compressedPubKey,
+        derivedOp.blsPubKeyHex
+      ).valid,
       false
     )
   })
