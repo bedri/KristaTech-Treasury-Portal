@@ -291,7 +291,7 @@ onMounted(() => {
         <div class="flex flex-wrap items-center gap-4">
           <span class="inline-flex items-center gap-1.5 font-mono text-[11px] text-[#7695CD]">
             <span class="w-2 h-2 rounded-full bg-[#7695CD]"></span>
-            Core v1.5.9.0 &bull; Proto 70983 &bull; KTDIP3 &amp; Fairness &bull; BLS12-381
+            Core v1.5.9.0 &bull; Proto 70983 &bull; KTDIP3 &amp; Fairness &bull; Hardening V4 &bull; BLS12-381
           </span>
           <a
             href="https://krista.kristalteknoloji.com"

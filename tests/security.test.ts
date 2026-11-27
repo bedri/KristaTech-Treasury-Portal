@@ -18,6 +18,7 @@ import {
   acquireProposalLock,
   sanitizeRpcErrorMessage,
   resolveKristaRpcConfig,
+  callKristaRpc,
   configureProposalsFileForTests,
   readProposalsAtomically,
   writeProposalsAtomically
@@ -208,5 +209,42 @@ describe('server/utils/security — Anti-Spoofing IP Resolution, Rate Limiting &
     assert.equal(isAllowedRpcMethod('sendtoaddress'), false)
     assert.equal(isAllowedRpcMethod('stop'), false)
     assert.equal(isAllowedRpcMethod(''), false)
+  })
+
+  it('includes V4 IsAllowedHTTPRequestHost (-rpcbind / numeric IP / localhost) hint on HTTP 403 RPC failures', async () => {
+    const prevUser = process.env.NUXT_RPC_USER
+    const prevPass = process.env.NUXT_RPC_PASSWORD
+    const prevUrl = process.env.NUXT_RPC_URL
+    const prevFetch = globalThis.fetch
+    try {
+      process.env.NUXT_RPC_USER = 'rpcu'
+      process.env.NUXT_RPC_PASSWORD = 'rpcp'
+      process.env.NUXT_RPC_URL = 'http://127.0.0.1:27998'
+      globalThis.fetch = (async () =>
+        new Response('Forbidden', { status: 403, statusText: 'Forbidden' })) as typeof fetch
+
+      await assert.rejects(
+        () => callKristaRpc('getblockchaininfo'),
+        (err: any) => {
+          const msg = String(err?.message || '')
+          assert.ok(msg.includes('403'))
+          assert.ok(msg.includes('IsAllowedHTTPRequestHost'))
+          assert.ok(msg.includes('-rpcbind=<hostname>'))
+          assert.ok(msg.includes('localhost'))
+          const sanitized = sanitizeRpcErrorMessage(err)
+          assert.ok(sanitized.includes('IsAllowedHTTPRequestHost'))
+          assert.ok(sanitized.includes('-rpcbind=<hostname>'))
+          return true
+        }
+      )
+    } finally {
+      globalThis.fetch = prevFetch
+      if (prevUser === undefined) delete process.env.NUXT_RPC_USER
+      else process.env.NUXT_RPC_USER = prevUser
+      if (prevPass === undefined) delete process.env.NUXT_RPC_PASSWORD
+      else process.env.NUXT_RPC_PASSWORD = prevPass
+      if (prevUrl === undefined) delete process.env.NUXT_RPC_URL
+      else process.env.NUXT_RPC_URL = prevUrl
+    }
   })
 })

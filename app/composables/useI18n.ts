@@ -60,7 +60,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Güncel Blok (H)',
       kpiTargetSpendBlock: 'Harcama Doğrulama Bloğu (H+1)',
       kpiDkgEpoch: 'Aktif DKG & Quorum Eşiği',
-      kpiMajorityRule: 'Çoğunluk İmza Eşiği',
+      kpiMajorityRule: 'BFT Süper Çoğunluk İmza Eşiği (2/3+1)',
       kpiActiveProposals: 'Oylamadaki Teklifler',
       kpiPendingVolume: 'Toplam Teklif Hacmi',
       kpiZeroCustody: 'Yerel İmza Güvenliği',
@@ -179,13 +179,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — KTDIP3 Hazine & H+1 Quorum Güvenlik Mimarisi',
       archPoint1Title: '1. Dinamik LLMQ Quorum (5→9→11→15), KTDIP3 & wallet.dat (mnmeta)',
       archPoint1Desc:
-        'Aktif Masternode sayısına göre kuorum boyutu dinamik ölçeklenir (<25 MN: 3/5, ≥25: 5/9, ≥50: 6/11, ≥100: 8/15) ve KTDIP3 operatör BLS anahtarı başına en fazla 1 koltuk seçilir. Eski masternode.conf dosyası wallet.dat mnmeta ve anlık uç tabanlı sıcak düğüm keşfiyle değiştirildi. Ağda <5 aktif MN (4.200 KRISTA teminat, 15 onay) bulunduğunda tüm gerçek MN’ler korunur; eksik koltuklar 7+1+3 ADAM havuzundan (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240 anahtarlı 15-bit HashX11KVS) tamamlanır.',
+        'Aktif Masternode sayısına göre kuorum boyutu dinamik ölçeklenir ve 2/3+1 BFT süper çoğunluğu uygulanır (<25 MN: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15); KTDIP3 operatör BLS anahtarı başına en fazla 1 koltuk seçilir. Eski masternode.conf dosyası wallet.dat mnmeta ve anlık uç tabanlı sıcak düğüm keşfiyle değiştirildi. Ağda <5 aktif MN (4.200 KRISTA teminat, 15 onay) bulunduğunda tüm gerçek MN’ler korunur; eksik koltuklar kota sınırlı ADAM havuzundan (en fazla 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240 anahtarlı 15-bit HashX11KVS) tamamlanır.',
       archPoint2Title: '2. 17 KRISTA Sabit Başlangıç, %7.0 Hazine & UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'Blok 2+ 17 KRISTA sabit emisyon (%2.15/259.200 blok azalım, 210M tavan) üzerinden %7.0 Developer Fund (Mainnet #5000 yönetişim aktivasyonu) ve %93.0 Net Havuz ayrılır. v1.5.9.0 UPGRADE_FAIRNESS; 4.200:250:10 Orantılı Sermaye VRF (≥%75 MN tabanı), 17 tek-geçişli algoritma, %40/11 eşit komite payı, %10 İmzacı LLMQ ödülü (-5/+5 PoSe), PoL (3x) + PoM (1.25x, α=0.25) ve %50/%50 yakım/hazine bölüşümü uygular.',
-      archPoint3Title: '3. KTDIP3 Hot/Cold İzolasyonu, 12s/30s Anti-Equivocation & Sıfır Gözetim',
+        'Blok 2+ 17 KRISTA sabit emisyon (%2.15/259.200 blok azalım, 210M tavan) üzerinden %7.0 Developer Fund (Mainnet #5000 yönetişim aktivasyonu) ve %93.0 Net Havuz ayrılır. Dengeli Model D (UPGRADE_FAIRNESS + Hardening V4); 4.200:250:10 Orantılı Sermaye VRF (ADAM_FAIR_COORD_V5 ≥%55 MN tabanı), 17 tek-geçişli algoritma, 15 koltuklu (8+2+3+2) %60/15 = %4.00 eşit komite payı, %10 İmzacı LLMQ ödülü (V4 M-4 PoSe: imzacılara -5 PoSe iyileşmesi, LLMQ ihmal cezası yok; sessiz birincil ADAM/koordinatöre +5 PoSe), PoL (3x) + PoM (1.25x, α=0.25) ve %50/%50 yakım/hazine bölüşümü uygular.',
+      archPoint3Title: '3. KTDIP3 Hot/Cold İzolasyonu, 45s Anti-Equivocation & Sıfır Gözetim',
       archPoint3Desc:
-        'Hazine harcamaları Spork ECDSA (SIGHASH_ALL) + H+1 kuorum çoğunluk CBLSSignedData (145B saf KTDIP3 Operatör BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] veya 209B+ Hibrit BLS+ECDSA) gerektirir. 12sn/30sn çift imza koruması uygulanır; WIF veya 64-hex BLS anahtarınız tarayıcıdan asla çıkmaz ve anında sıfırlanır.'
+        'Hazine harcamaları Spork ECDSA (SIGHASH_ALL) + H+1 2/3+1 BFT süper çoğunluk CBLSSignedData (KRISTA_LLMQ_TREASURY_V1_ alan etiketli 145B saf KTDIP3 Operatör BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] veya 209B+ Hibrit BLS+ECDSA) gerektirir. 45sn çift imza (anti-equivocation) koruması uygulanır; WIF veya 64-hex BLS anahtarınız tarayıcıdan asla çıkmaz ve anında sıfırlanır.'
     }),
     en: Object.freeze({
       skipToContent: 'Skip to main content',
@@ -208,7 +208,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Current Block (H)',
       kpiTargetSpendBlock: 'Spend Verification Block (H+1)',
       kpiDkgEpoch: 'Active DKG & Quorum Threshold',
-      kpiMajorityRule: 'Majority Signature Threshold',
+      kpiMajorityRule: 'BFT Supermajority Signature Threshold (2/3+1)',
       kpiActiveProposals: 'Proposals in Voting',
       kpiPendingVolume: 'Total Proposal Volume',
       kpiZeroCustody: 'Local Signing Security',
@@ -327,13 +327,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — KTDIP3 Treasury & H+1 Quorum Security Architecture',
       archPoint1Title: '1. Dynamic LLMQ (5→9→11→15), KTDIP3 & wallet.dat (mnmeta)',
       archPoint1Desc:
-        'Quorum size scales dynamically (<25 MNs: 3/5, ≥25: 5/9, ≥50: 6/11, ≥100: 8/15) with max 1 seat per unique KTDIP3 BLS operator key. Legacy masternode.conf is retired into wallet.dat mnmeta with tip-driven hot node discovery. When <5 active MNs (4,200 KRISTA, 15 confs) exist, all real MNs are preserved and deficits fill from the 7+1+3 ADAM pool (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240-key 15-bit HashX11KVS).',
+        'Quorum size scales dynamically with a 2/3+1 BFT supermajority threshold (<25 MNs: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15) and max 1 seat per unique KTDIP3 BLS operator key. Legacy masternode.conf is retired into wallet.dat mnmeta with tip-driven hot node discovery. When <5 active MNs (4,200 KRISTA, 15 confs) exist, all real MNs are preserved and deficits fill from the quota-capped ADAM pool (max 1 Coin-Lock [250] + max 3 Funded PoW [10] + Open PoW [0 KRISTA], 240-key 15-bit HashX11KVS).',
       archPoint2Title: '2. 17 KRISTA Start, 7.0% Treasury & UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'Block 2+ starts at 17 KRISTA (2.15%/259,200-block decay, 210M cap) allocating 7.0% to the Developer Fund (Mainnet #5000 governance activation) and 93.0% to the Net Pool. Under v1.5.9.0 UPGRADE_FAIRNESS: Proportional Capital VRF (4,200:250:10, ≥75% MN floor), uniform 17-algo puzzles, 40%/11 equal committee payouts, 10% signer-only LLMQ rewards (-5/+5 PoSe), PoL (3x) + PoM (1.25x, α=0.25), and 50/50 burn/treasury split.',
-      archPoint3Title: '3. KTDIP3 Hot/Cold Isolation, 12s/30s Anti-Equivocation & Zero Custody',
+        'Block 2+ starts at 17 KRISTA (2.15%/259,200-block decay, 210M cap) allocating 7.0% to the Developer Fund (Mainnet #5000 governance activation) and 93.0% to the Net Pool. Under Balanced Model D (UPGRADE_FAIRNESS + Hardening V4): Proportional Capital VRF (4,200:250:10, ADAM_FAIR_COORD_V5 ≥55% MN floor), uniform 17-algo puzzles, 15 committee seats (8+2+3+2) paying 60%/15 = 4.00% equally, 10% signer-only LLMQ rewards (V4 M-4 PoSe: -5 recovery for signers with no LLMQ omission penalty; +5 for silent primary ADAM/coordinator), PoL (3x) + PoM (1.25x, α=0.25), and 50/50 burn/treasury split.',
+      archPoint3Title: '3. KTDIP3 Hot/Cold Isolation, 45s Anti-Equivocation & Zero Custody',
       archPoint3Desc:
-        'Treasury spends require Spork ECDSA (SIGHASH_ALL) + H+1 quorum majority CBLSSignedData (145B pure KTDIP3 Operator BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] or 209B+ Hybrid BLS+ECDSA) with 12s/30s anti-equivocation guards. Your WIF or 64-hex BLS key never leaves your browser and memory buffers are zero-filled immediately.'
+        'Treasury spends require Spork ECDSA (SIGHASH_ALL) + H+1 2/3+1 BFT supermajority CBLSSignedData (145B pure KTDIP3 Operator BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] or 209B+ Hybrid BLS+ECDSA under KRISTA_LLMQ_TREASURY_V1_) with a 45s anti-equivocation guard. Your WIF or 64-hex BLS key never leaves your browser and memory buffers are zero-filled immediately.'
     }),
     de: Object.freeze({
       skipToContent: 'Zum Hauptinhalt springen',
@@ -356,7 +356,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Aktueller Block (H)',
       kpiTargetSpendBlock: 'Prüfblock für Ausgaben (H+1)',
       kpiDkgEpoch: 'Aktives DKG & Quorum-Schwelle',
-      kpiMajorityRule: 'Mehrheits-Signaturschwelle',
+      kpiMajorityRule: 'BFT-Supermehrheits-Signaturschwelle (2/3+1)',
       kpiActiveProposals: 'Aktive Vorschläge',
       kpiPendingVolume: 'Gesamtes Vorschlagsvolumen',
       kpiZeroCustody: 'Lokale Signatursicherheit',
@@ -474,13 +474,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — KTDIP3 CBLSSignedData & H+1 Quorum',
       archPoint1Title: '1. Dynamische LLMQ (5→9→11→15), KTDIP3 & wallet.dat (mnmeta)',
       archPoint1Desc:
-        'Das Quorum skaliert dynamisch (3/5, 5/9, 6/11, 8/15) mit max. 1 Platz pro KTDIP3-BLS-Operator; masternode.conf wurde in wallet.dat mnmeta überführt. Bei <5 aktiven MNs (4.200 KRISTA, 15 Bestätigungen) bleiben alle echten MNs erhalten und fehlende Plätze füllt der 7+1+3-ADAM-Pool (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240-Key 15-Bit HashX11KVS).',
+        'Das Quorum skaliert dynamisch mit einer 2/3+1-BFT-Supermehrheit (<25 MNs: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15) bei max. 1 Platz pro KTDIP3-BLS-Operator; masternode.conf wurde in wallet.dat mnmeta überführt. Bei <5 aktiven MNs (4.200 KRISTA, 15 Bestätigungen) bleiben alle echten MNs erhalten und fehlende Plätze füllt der quotenbegrenzte ADAM-Pool (max. 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240-Key 15-Bit HashX11KVS).',
       archPoint2Title: '2. 17 KRISTA Start, 7,0% Treasury & UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'Ab Block 2 gelten 17 KRISTA (2,15%/259.200-Blöcke-Abnahme, 210M-Cap): 7,0% Developer Fund (Mainnet #5000 Aktivierung) und 93,0% Netto-Pool. v1.5.9.0 UPGRADE_FAIRNESS nutzt proportionales Kapital-VRF (4.200:250:10, ≥75% MN-Untergrenze), 17 einheitliche Algorithmen, 40%/11 gleiche Sitze, 10% Signer-LLMQ (-5/+5 PoSe), PoL (3x) + PoM (1,25x) und 50/50 Burn/Treasury.',
-      archPoint3Title: '3. KTDIP3 Hot/Cold-Isolierung, 12s/30s Anti-Equivocation & Zero-Custody',
+        'Ab Block 2 gelten 17 KRISTA (2,15%/259.200-Blöcke-Abnahme, 210M-Cap): 7,0% Developer Fund (Mainnet #5000 Aktivierung) und 93,0% Netto-Pool. Balanced Model D (UPGRADE_FAIRNESS + Hardening V4) nutzt proportionales Kapital-VRF (4.200:250:10, ADAM_FAIR_COORD_V5 ≥55% MN-Untergrenze), 17 einheitliche Algorithmen, 15 Sitze (8+2+3+2) mit 60%/15 = 4,00% pro Platz, 10% Signer-LLMQ (V4 M-4 PoSe: -5 Erholung ohne LLMQ-Versäumnisstrafe; +5 für stillen primären ADAM/Koordinator), PoL (3x) + PoM (1,25x, α=0,25) und 50/50 Burn/Treasury.',
+      archPoint3Title: '3. KTDIP3 Hot/Cold-Isolierung, 45s Anti-Equivocation & Zero-Custody',
       archPoint3Desc:
-        'Erfordert Spork-ECDSA + H+1-CBLSSignedData (145B KTDIP3 Operator-BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] oder 209B+ Hybrid BLS+ECDSA) samt 12s/30s-Schutz. Ihr WIF- oder 64-Hex-BLS-Schlüssel verlässt niemals den Browser und wird sofort gelöscht.'
+        'Erfordert Spork-ECDSA + H+1-BFT-Supermehrheit (2/3+1) via CBLSSignedData (145B KTDIP3 Operator-BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] oder 209B+ Hybrid BLS+ECDSA mit KRISTA_LLMQ_TREASURY_V1_) samt 45s-Anti-Equivocation-Schutz. Ihr WIF- oder 64-Hex-BLS-Schlüssel verlässt niemals den Browser und wird sofort gelöscht.'
     }),
     es: Object.freeze({
       skipToContent: 'Saltar al contenido principal',
@@ -503,7 +503,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Bloque Actual (H)',
       kpiTargetSpendBlock: 'Bloque de Verificación (H+1)',
       kpiDkgEpoch: 'DKG Activo y Umbral de Quórum',
-      kpiMajorityRule: 'Umbral de Mayoría de Firmas',
+      kpiMajorityRule: 'Umbral de Supermayoría BFT (2/3+1)',
       kpiActiveProposals: 'Propuestas en Votación',
       kpiPendingVolume: 'Volumen Total de Propuestas',
       kpiZeroCustody: 'Seguridad de Firma Local',
@@ -621,13 +621,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — Seguridad KTDIP3 CBLSSignedData y Quórum H+1',
       archPoint1Title: '1. LLMQ Dinámico (5→9→11→15), KTDIP3 y wallet.dat (mnmeta)',
       archPoint1Desc:
-        'El quórum escala dinámicamente (3/5, 5/9, 6/11, 8/15) con máx. 1 plaza por operador BLS KTDIP3 y masternode.conf retirado hacia wallet.dat mnmeta. Con <5 MNs activos (4,200 KRISTA, 15 confs) se preservan los MNs reales y las vacantes se completan desde el pool ADAM 7+1+3 (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240 claves HashX11KVS 15-bit).',
+        'El quórum escala dinámicamente con supermayoría BFT 2/3+1 (<25 MNs: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15) y máx. 1 plaza por operador BLS KTDIP3; masternode.conf se retiró hacia wallet.dat mnmeta. Con <5 MNs activos (4,200 KRISTA, 15 confs) se preservan los MNs reales y las vacantes se completan desde el pool ADAM con cuota limitada (máx. 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240 claves HashX11KVS 15-bit).',
       archPoint2Title: '2. Inicio 17 KRISTA, 7.0% Tesorería y UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'Bloque 2+ emite 17 KRISTA (reducción 2.15%/259,200 bloques, tope 210M): 7.0% al Developer Fund (activación Mainnet #5000) y 93.0% al Pool Neto. UPGRADE_FAIRNESS v1.5.9.0 aplica VRF proporcional (4,200:250:10, piso ≥75% MN), 17 algoritmos uniformes, pagos iguales 40%/11, 10% LLMQ firmantes (-5/+5 PoSe), PoL (3x) + PoM (1.25x) y división 50/50.',
-      archPoint3Title: '3. Aislamiento KTDIP3 Hot/Cold, Guardia 12s/30s y Firma Sin Custodia',
+        'Bloque 2+ emite 17 KRISTA (reducción 2.15%/259,200 bloques, tope 210M): 7.0% al Developer Fund (activación Mainnet #5000) y 93.0% al Pool Neto. Balanced Model D (UPGRADE_FAIRNESS + Hardening V4) aplica VRF proporcional (4,200:250:10, ADAM_FAIR_COORD_V5 piso ≥55% MN), 17 algoritmos uniformes, 15 plazas (8+2+3+2) con 60%/15 = 4.00% por plaza, 10% LLMQ firmantes (V4 M-4 PoSe: -5 recuperación sin penalización por omisión LLMQ; +5 para ADAM/coordinador primario inactivo), PoL (3x) + PoM (1.25x, α=0.25) y división 50/50.',
+      archPoint3Title: '3. Aislamiento KTDIP3 Hot/Cold, Guardia 45s y Firma Sin Custodia',
       archPoint3Desc:
-        'Requiere Spork ECDSA + mayoría H+1 CBLSSignedData (145B Operador BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] o 209B+ Híbrida BLS+ECDSA) con guardia de 12s/30s. Su clave WIF o BLS (64 hex) nunca sale del navegador.'
+        'Requiere Spork ECDSA + supermayoría BFT 2/3+1 H+1 CBLSSignedData (145B Operador BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] o 209B+ Híbrida BLS+ECDSA con KRISTA_LLMQ_TREASURY_V1_) y guardia anti-equivocation de 45s. Su clave WIF o BLS (64 hex) nunca sale del navegador.'
     }),
     fr: Object.freeze({
       skipToContent: 'Aller au contenu principal',
@@ -650,7 +650,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Bloc Actuel (H)',
       kpiTargetSpendBlock: 'Bloc de Vérification (H+1)',
       kpiDkgEpoch: 'DKG Actif & Seuil de Quorum',
-      kpiMajorityRule: 'Seuil de Majorité de Signatures',
+      kpiMajorityRule: 'Seuil de Supermajorité BFT (2/3+1)',
       kpiActiveProposals: 'Propositions en Vote',
       kpiPendingVolume: 'Volume Total des Propositions',
       kpiZeroCustody: 'Sécurité de Signature Locale',
@@ -768,13 +768,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — Sécurité KTDIP3 CBLSSignedData & Quorum H+1',
       archPoint1Title: '1. Quorum LLMQ (5→9→11→15), KTDIP3 & wallet.dat (mnmeta)',
       archPoint1Desc:
-        'Le quorum évolue dynamiquement (3/5, 5/9, 6/11, 8/15) avec max 1 siège par opérateur BLS KTDIP3 et migration de masternode.conf vers wallet.dat mnmeta. Avec <5 MNs actifs (4 200 KRISTA, 15 confs), les MNs réels sont préservés et complétés par le pool ADAM 7+1+3 (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240 clés HashX11KVS 15-bit).',
+        'Le quorum évolue dynamiquement avec une supermajorité BFT 2/3+1 (<25 MNs : 4/5, ≥25 : 7/9, ≥50 : 8/11, ≥100 : 11/15) et max 1 siège par opérateur BLS KTDIP3 ; masternode.conf a migré vers wallet.dat mnmeta. Avec <5 MNs actifs (4 200 KRISTA, 15 confs), les MNs réels sont préservés et complétés par le pool ADAM plafonné (max 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240 clés HashX11KVS 15-bit).',
       archPoint2Title: '2. Départ 17 KRISTA, 7,0 % Trésorerie & UPGRADE_FAIRNESS Modèle D',
       archPoint2Desc:
-        'Dès le bloc 2, émission de 17 KRISTA (décroissance 2,15 %/259 200 blocs, plafond 210M) : 7,0 % Developer Fund (activation Mainnet #5000) et 93,0 % Pool Net. UPGRADE_FAIRNESS v1.5.9.0 applique un VRF proportionnel (4 200:250:10, plancher ≥75 % MN), 17 algos uniformes, 40 %/11 égaux, 10 % LLMQ signataires (-5/+5 PoSe), PoL (3x) + PoM (1,25x) et partage 50/50.',
-      archPoint3Title: '3. Isolation KTDIP3 Hot/Cold, Garde 12s/30s & Signature Sans Garde',
+        'Dès le bloc 2, émission de 17 KRISTA (décroissance 2,15 %/259 200 blocs, plafond 210M) : 7,0 % Developer Fund (activation Mainnet #5000) et 93,0 % Pool Net. Modèle D équilibré (UPGRADE_FAIRNESS + Hardening V4) : VRF proportionnel (4 200:250:10, ADAM_FAIR_COORD_V5 plancher ≥55 % MN), 17 algos uniformes, 15 sièges (8+2+3+2) à 60 %/15 = 4,00 %, 10 % LLMQ signataires (V4 M-4 PoSe : -5 récupération sans pénalité d’omission LLMQ ; +5 pour ADAM/coordinateur primaire silencieux), PoL (3x) + PoM (1,25x, α=0,25) et partage 50/50.',
+      archPoint3Title: '3. Isolation KTDIP3 Hot/Cold, Garde 45s & Signature Sans Garde',
       archPoint3Desc:
-        'Nécessite Spork ECDSA + majorité H+1 CBLSSignedData (145B Opérateur BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] ou 209B+ Hybride BLS+ECDSA) avec garde 12s/30s. Votre clé WIF ou BLS (64 hex) ne quitte jamais le navigateur.'
+        'Nécessite Spork ECDSA + supermajorité BFT 2/3+1 H+1 CBLSSignedData (145B Opérateur BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] ou 209B+ Hybride BLS+ECDSA sous KRISTA_LLMQ_TREASURY_V1_) avec garde anti-équivocation de 45s. Votre clé WIF ou BLS (64 hex) ne quitte jamais le navigateur.'
     }),
     ru: Object.freeze({
       skipToContent: 'Перейти к основному содержимому',
@@ -797,7 +797,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Текущий блок (H)',
       kpiTargetSpendBlock: 'Блок проверки траты (H+1)',
       kpiDkgEpoch: 'Активный DKG и порог кворума',
-      kpiMajorityRule: 'Порог большинства подписей',
+      kpiMajorityRule: 'Порог супербольшинства BFT (2/3+1)',
       kpiActiveProposals: 'Предложения на голосовании',
       kpiPendingVolume: 'Общий объём предложений',
       kpiZeroCustody: 'Локальная безопасность подписи',
@@ -915,13 +915,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — Безопасность KTDIP3 CBLSSignedData и кворума H+1',
       archPoint1Title: '1. Динамический LLMQ (5→9→11→15), KTDIP3 и wallet.dat (mnmeta)',
       archPoint1Desc:
-        'Кворум масштабируется динамически (3/5, 5/9, 6/11, 8/15), макс. 1 место на оператора BLS KTDIP3; masternode.conf перенесён в wallet.dat mnmeta с обнаружением горячих узлов. При <5 активных MN (4200 KRISTA, 15 подтв.) реальные MN сохраняются, а дефицит заполняет пул ADAM 7+1+3 (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240 ключей HashX11KVS 15-bit).',
+        'Кворум масштабируется динамически с порогом супербольшинства BFT 2/3+1 (<25 MN: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15), макс. 1 место на оператора BLS KTDIP3; masternode.conf перенесён в wallet.dat mnmeta с обнаружением горячих узлов. При <5 активных MN (4200 KRISTA, 15 подтв.) реальные MN сохраняются, а дефицит заполняет квотируемый пул ADAM (макс. 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240 ключей HashX11KVS 15-bit).',
       archPoint2Title: '2. Старт 17 KRISTA, 7,0% Казначейство и UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'С блока 2+ эмиссия 17 KRISTA (снижение 2,15%/259 200 блоков, потолок 210M): 7,0% в Developer Fund (активация Mainnet #5000) и 93,0% в чистый пул. В v1.5.9.0 UPGRADE_FAIRNESS: пропорциональный VRF капитала (4200:250:10, порог ≥75% MN), 17 однородных алгоритмов, равные доли 40%/11, 10% LLMQ подписантам (-5/+5 PoSe), PoL (3x) + PoM (1,25x) и деление 50/50.',
-      archPoint3Title: '3. Изоляция KTDIP3 Hot/Cold, защита 12с/30с и некастодиальная подпись',
+        'С блока 2+ эмиссия 17 KRISTA (снижение 2,15%/259 200 блоков, потолок 210M): 7,0% в Developer Fund (активация Mainnet #5000) и 93,0% в чистый пул. Сбалансированная Model D (UPGRADE_FAIRNESS + Hardening V4): пропорциональный VRF капитала (4200:250:10, ADAM_FAIR_COORD_V5 порог ≥55% MN), 17 однородных алгоритмов, 15 мест (8+2+3+2) по 60%/15 = 4,00%, 10% LLMQ подписантам (V4 M-4 PoSe: -5 восстановление без штрафа за пропуск LLMQ; +5 за молчание первичного ADAM/координатора), PoL (3x) + PoM (1,25x, α=0,25) и деление 50/50.',
+      archPoint3Title: '3. Изоляция KTDIP3 Hot/Cold, защита 45с и некастодиальная подпись',
       archPoint3Desc:
-        'Требуется Spork ECDSA + большинство H+1 CBLSSignedData (145B операторский BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] или 209B+ гибридный BLS+ECDSA) с защитой 12с/30с. Ваш WIF или 64-hex BLS-ключ не покидает браузер.'
+        'Требуется Spork ECDSA + супербольшинство BFT 2/3+1 H+1 CBLSSignedData (145B операторский BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] или 209B+ гибридный BLS+ECDSA с доменом KRISTA_LLMQ_TREASURY_V1_) и защита от двойной подписи 45с. Ваш WIF или 64-hex BLS-ключ не покидает браузер.'
     }),
     zh: Object.freeze({
       skipToContent: '跳转到主要内容',
@@ -944,7 +944,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: '当前区块 (H)',
       kpiTargetSpendBlock: '支出验证区块 (H+1)',
       kpiDkgEpoch: '活跃 DKG 与仲裁阈值',
-      kpiMajorityRule: '多数签名阈值',
+      kpiMajorityRule: 'BFT 绝对多数签名阈值 (2/3+1)',
       kpiActiveProposals: '投票中的提案',
       kpiPendingVolume: '提案总金额',
       kpiZeroCustody: '本地签名安全',
@@ -1058,13 +1058,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — KTDIP3 CBLSSignedData 与 H+1 仲裁安全架构',
       archPoint1Title: '1. 动态 LLMQ (5→9→11→15)、KTDIP3 与 wallet.dat (mnmeta)',
       archPoint1Desc:
-        '仲裁动态扩展（3/5、5/9、6/11、8/15），每个 KTDIP3 BLS 操作员最多 1 个席位；masternode.conf 已迁移至 wallet.dat mnmeta 并支持基于区块尖端的热节点发现。活跃主节点 <5 (4,200 KRISTA, 15 确认) 时保留全部真实主节点，缺额由 7+1+3 ADAM 池（1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA]，240 键 15-bit HashX11KVS）补齐。',
+        '仲裁采用 2/3+1 BFT 绝对多数阈值并随活跃主节点动态扩展（<25 MN: 4/5、≥25: 7/9、≥50: 8/11、≥100: 11/15），每个 KTDIP3 BLS 操作员最多 1 个席位；masternode.conf 已迁移至 wallet.dat mnmeta 并支持基于区块尖端的热节点发现。活跃主节点 <5 (4,200 KRISTA, 15 确认) 时保留全部真实主节点，缺额由配额受限的 ADAM 池（最多 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA]，240 键 15-bit HashX11KVS）补齐。',
       archPoint2Title: '2. 17 KRISTA 起步、7.0% 财库与 UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        '区块 2+ 以 17 KRISTA 起步（每 259,200 区块递减 2.15%，上限 210M）：7.0% 开发者基金（Mainnet #5000 治理激活）与 93.0% 净池。v1.5.9.0 UPGRADE_FAIRNESS 采用 4,200:250:10 按资本比例 VRF（≥75% MN 下限）、17 种统一算法、40%/11 均等报酬、10% 签名者 LLMQ（-5/+5 PoSe）、PoL (3x) + PoM (1.25x) 及 50/50 分配。',
-      archPoint3Title: '3. KTDIP3 热/冷隔离、12秒/30秒防双签与零托管签名',
+        '区块 2+ 以 17 KRISTA 起步（每 259,200 区块递减 2.15%，上限 210M）：7.0% 开发者基金（Mainnet #5000 治理激活）与 93.0% 净池。均衡 Model D（UPGRADE_FAIRNESS + Hardening V4）采用 4,200:250:10 按资本比例 VRF（ADAM_FAIR_COORD_V5 ≥55% MN 下限）、17 种统一算法、15 席位 (8+2+3+2) 均分 60%/15 = 4.00%、10% 签名者 LLMQ（V4 M-4 PoSe：签名 -5 恢复且无 LLMQ 漏签惩罚；静默主 ADAM/协调者 +5）、PoL (3x) + PoM (1.25x, α=0.25) 及 50/50 分配。',
+      archPoint3Title: '3. KTDIP3 热/冷隔离、45秒防双签与零托管签名',
       archPoint3Desc:
-        '须具备 Spork ECDSA + H+1 仲裁多数 CBLSSignedData（145B 纯操作员 BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] 或 209B+ 混合 BLS+ECDSA）与 12秒/30秒防双签保护。WIF 或 64 位 BLS 密钥绝不离开浏览器。'
+        '须具备 Spork ECDSA + H+1 2/3+1 BFT 绝对多数 CBLSSignedData（KRISTA_LLMQ_TREASURY_V1_ 域下 145B 纯操作员 BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] 或 209B+ 混合 BLS+ECDSA）与 45秒防双签保护。WIF 或 64 位 BLS 密钥绝不离开浏览器。'
     }),
     ja: Object.freeze({
       skipToContent: 'メインコンテンツへスキップ',
@@ -1087,7 +1087,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: '現在のブロック (H)',
       kpiTargetSpendBlock: '支出検証ブロック (H+1)',
       kpiDkgEpoch: 'アクティブ DKG ＆ 閾値',
-      kpiMajorityRule: '過半数署名閾値',
+      kpiMajorityRule: 'BFT 特別多数署名閾値 (2/3+1)',
       kpiActiveProposals: '投票中の提案',
       kpiPendingVolume: '提案合計額',
       kpiZeroCustody: 'ローカル署名セキュリティ',
@@ -1204,13 +1204,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — KTDIP3 CBLSSignedData ＆ H+1 クォーラム',
       archPoint1Title: '1. 動的 LLMQ (5→9→11→15)、KTDIP3 ＆ wallet.dat (mnmeta)',
       archPoint1Desc:
-        'クォーラムは動的拡大（3/5、5/9、6/11、8/15）し、KTDIP3 BLS オペレーター鍵ごとに最大1枠です。masternode.conf は wallet.dat mnmeta と先端駆動のホットノード検出へ移行しました。<5 MN 時（4,200 KRISTA、15承認）は全実ノードを保持し、不足枠は 7+1+3 ADAM（1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA]、240鍵 15-bit HashX11KVS）で補填します。',
+        'クォーラムは 2/3+1 BFT 特別多数（<25 MN: 4/5、≥25: 7/9、≥50: 8/11、≥100: 11/15）で動的拡大し、KTDIP3 BLS オペレーター鍵ごとに最大1枠です。masternode.conf は wallet.dat mnmeta と先端駆動のホットノード検出へ移行しました。<5 MN 時（4,200 KRISTA、15承認）は全実ノードを保持し、不足枠は上限付き ADAM プール（最大 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA]、240鍵 15-bit HashX11KVS）で補填します。',
       archPoint2Title: '2. 17 KRISTA 開始・7.0% 開発基金・UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'ブロック 2+ は 17 KRISTA で開始（259,200ブロック毎に 2.15% 減衰、上限 210M）：7.0% が開発基金（Mainnet #5000 有効化）、93.0% が純報酬プールです。v1.5.9.0 UPGRADE_FAIRNESS は 4,200:250:10 比例資本 VRF（MN 下限 ≥75%）、17種均一アルゴリズム、40%/11 均等報酬、10% 署名者 LLMQ（-5/+5 PoSe）、PoL (3x) + PoM (1.25x)、50/50 分割を採用します。',
-      archPoint3Title: '3. KTDIP3 Hot/Cold 分離・12秒/30秒二重署名防止・ゼロカストディ',
+        'ブロック 2+ は 17 KRISTA で開始（259,200ブロック毎に 2.15% 減衰、上限 210M）：7.0% が開発基金（Mainnet #5000 有効化）、93.0% が純報酬プールです。均衡型 Model D（UPGRADE_FAIRNESS + Hardening V4）は 4,200:250:10 比例資本 VRF（ADAM_FAIR_COORD_V5 MN 下限 ≥55%）、17種均一アルゴリズム、15枠（8+2+3+2）で 60%/15 = 4.00% 均等配分、10% 署名者 LLMQ（V4 M-4 PoSe：署名で -5 回復・LLMQ 未署名罰則なし、沈黙した一次 ADAM/コーディネーターに +5）、PoL (3x) + PoM (1.25x, α=0.25)、50/50 分割を採用します。',
+      archPoint3Title: '3. KTDIP3 Hot/Cold 分離・45秒二重署名防止・ゼロカストディ',
       archPoint3Desc:
-        'Spork ECDSA ＋ H+1 過半数 CBLSSignedData（145B オペレーター BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] または 209B+ ハイブリッド BLS+ECDSA）と 12秒/30秒保護が必要です。WIF や 64文字 BLS 鍵はブラウザ外へ送信されません。'
+        'Spork ECDSA ＋ H+1 2/3+1 BFT 特別多数 CBLSSignedData（KRISTA_LLMQ_TREASURY_V1_ ドメインの 145B オペレーター BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] または 209B+ ハイブリッド BLS+ECDSA）と 45秒の二重署名防止保護が必要です。WIF や 64文字 BLS 鍵はブラウザ外へ送信されません。'
     }),
     ko: Object.freeze({
       skipToContent: '본문으로 건너뛰기',
@@ -1233,7 +1233,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: '현재 블록 (H)',
       kpiTargetSpendBlock: '지출 검증 블록 (H+1)',
       kpiDkgEpoch: '활성 DKG 및 쿼럼 임계값',
-      kpiMajorityRule: '과반수 서명 임계값',
+      kpiMajorityRule: 'BFT 절대다수 서명 임계값 (2/3+1)',
       kpiActiveProposals: '투표 중인 제안',
       kpiPendingVolume: '총 제안 규모',
       kpiZeroCustody: '로컬 서명 보안',
@@ -1350,13 +1350,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — KTDIP3 CBLSSignedData & H+1 쿼럼',
       archPoint1Title: '1. 동적 LLMQ (5→9→11→15), KTDIP3 & wallet.dat (mnmeta)',
       archPoint1Desc:
-        '쿼럼이 동적으로 확장(3/5, 5/9, 6/11, 8/15)되며 KTDIP3 BLS 오퍼레이터당 최대 1석으로 제한됩니다. masternode.conf는 팁 기반 핫 노드 검색을 포함한 wallet.dat mnmeta로 통합되었습니다. 활성 MN <5(4,200 KRISTA, 15 컨펌) 시 실제 MN을 보존하고 7+1+3 ADAM 풀(1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240키 15-bit HashX11KVS)에서 채웁니다.',
+        '쿼럼은 2/3+1 BFT 절대다수 임계값으로 동적 확장(<25 MN: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15)되며 KTDIP3 BLS 오퍼레이터당 최대 1석으로 제한됩니다. masternode.conf는 팁 기반 핫 노드 검색을 포함한 wallet.dat mnmeta로 통합되었습니다. 활성 MN <5(4,200 KRISTA, 15 컨펌) 시 실제 MN을 보존하고 쿼터 제한 ADAM 풀(최대 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240키 15-bit HashX11KVS)에서 채웁니다.',
       archPoint2Title: '2. 17 KRISTA 시작, 7.0% 펀드 및 UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        '블록 2+는 17 KRISTA로 시작(259,200블록당 2.15% 감소, 210M 상한)하며 7.0%는 개발 펀드(Mainnet #5000 활성화), 93.0%는 순 보상 풀에 배정됩니다. v1.5.9.0 UPGRADE_FAIRNESS는 4,200:250:10 자본 비례 VRF(≥75% MN 하한), 17개 단일 알고리즘, 40%/11 균등 보상, 10% 서명자 LLMQ(-5/+5 PoSe), PoL (3x) + PoM (1.25x) 및 50/50 분할을 적용합니다.',
-      archPoint3Title: '3. KTDIP3 Hot/Cold 격리, 12초/30초 이중서명 방지 및 제로 커스터디',
+        '블록 2+는 17 KRISTA로 시작(259,200블록당 2.15% 감소, 210M 상한)하며 7.0%는 개발 펀드(Mainnet #5000 활성화), 93.0%는 순 보상 풀에 배정됩니다. 균형 Model D(UPGRADE_FAIRNESS + Hardening V4)는 4,200:250:10 자본 비례 VRF(ADAM_FAIR_COORD_V5 ≥55% MN 하한), 17개 단일 알고리즘, 15석(8+2+3+2) 60%/15 = 4.00% 균등 보상, 10% 서명자 LLMQ(V4 M-4 PoSe: 서명 시 -5 회복·LLMQ 미서명 페널티 없음, 응답 없는 1차 ADAM/코디네이터 +5), PoL (3x) + PoM (1.25x, α=0.25) 및 50/50 분할을 적용합니다.',
+      archPoint3Title: '3. KTDIP3 Hot/Cold 격리, 45초 이중서명 방지 및 제로 커스터디',
       archPoint3Desc:
-        'Spork ECDSA 및 H+1 과반수 CBLSSignedData(145B 순수 오퍼레이터 BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] 또는 209B+ 하이브리드 BLS+ECDSA)와 12초/30초 보호가 필요합니다. WIF 또는 64자리 BLS 키는 브라우저를 벗어나지 않습니다.'
+        'Spork ECDSA 및 H+1 2/3+1 BFT 절대다수 CBLSSignedData(KRISTA_LLMQ_TREASURY_V1_ 도메인 145B 순수 오퍼레이터 BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] 또는 209B+ 하이브리드 BLS+ECDSA)와 45초 이중서명 방지 보호가 필요합니다. WIF 또는 64자리 BLS 키는 브라우저를 벗어나지 않습니다.'
     }),
     pt: Object.freeze({
       skipToContent: 'Ir para o conteúdo principal',
@@ -1379,7 +1379,7 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       kpiCurrentBlock: 'Bloco Atual (H)',
       kpiTargetSpendBlock: 'Bloco de Verificação (H+1)',
       kpiDkgEpoch: 'DKG Ativo e Limite de Quórum',
-      kpiMajorityRule: 'Limite de Maioria de Assinaturas',
+      kpiMajorityRule: 'Limite de Supermaioria BFT (2/3+1)',
       kpiActiveProposals: 'Propostas em Votação',
       kpiPendingVolume: 'Volume Total de Propostas',
       kpiZeroCustody: 'Segurança de Assinatura Local',
@@ -1497,13 +1497,13 @@ export const translations: Readonly<Record<LocaleCode, Readonly<Record<string, s
       archModalTitle: 'KristaTech Core v1.5.9.0 (Proto 70983) — Segurança KTDIP3 CBLSSignedData e Quórum H+1',
       archPoint1Title: '1. LLMQ Dinâmico (5→9→11→15), KTDIP3 e wallet.dat (mnmeta)',
       archPoint1Desc:
-        'O quórum escala dinamicamente (3/5, 5/9, 6/11, 8/15) com no máx. 1 vaga por operador BLS KTDIP3; masternode.conf foi aposentado em favor de wallet.dat mnmeta com descoberta na ponta. Com <5 MNs ativos (4.200 KRISTA, 15 confs), os MNs reais são preservados e o restante vem do pool ADAM 7+1+3 (1 Coin-Lock [250] + 2 Funded PoW [10] + 1 Open PoW [0 KRISTA], 240 chaves HashX11KVS 15-bit).',
+        'O quórum escala dinamicamente com supermaioria BFT 2/3+1 (<25 MNs: 4/5, ≥25: 7/9, ≥50: 8/11, ≥100: 11/15) e no máx. 1 vaga por operador BLS KTDIP3; masternode.conf foi aposentado em favor de wallet.dat mnmeta com descoberta na ponta. Com <5 MNs ativos (4.200 KRISTA, 15 confs), os MNs reais são preservados e o restante vem do pool ADAM com cota limitada (máx. 1 Coin-Lock [250] + 3 Funded PoW [10] + Open PoW [0 KRISTA], 240 chaves HashX11KVS 15-bit).',
       archPoint2Title: '2. Início 17 KRISTA, 7,0% Tesouraria e UPGRADE_FAIRNESS Model D',
       archPoint2Desc:
-        'Bloco 2+ inicia em 17 KRISTA (redução 2,15%/259.200 blocos, teto 210M): 7,0% Developer Fund (ativação Mainnet #5000) e 93,0% Pool Líquido. v1.5.9.0 UPGRADE_FAIRNESS aplica VRF proporcional (4.200:250:10, piso ≥75% MN), 17 algoritmos uniformes, 40%/11 iguais, 10% LLMQ signatários (-5/+5 PoSe), PoL (3x) + PoM (1,25x) e divisão 50/50.',
-      archPoint3Title: '3. Isolamento KTDIP3 Hot/Cold, Guarda 12s/30s e Assinatura Sem Custódia',
+        'Bloco 2+ inicia em 17 KRISTA (redução 2,15%/259.200 blocos, teto 210M): 7,0% Developer Fund (ativação Mainnet #5000) e 93,0% Pool Líquido. Balanced Model D (UPGRADE_FAIRNESS + Hardening V4) aplica VRF proporcional (4.200:250:10, ADAM_FAIR_COORD_V5 piso ≥55% MN), 17 algoritmos uniformes, 15 assentos (8+2+3+2) com 60%/15 = 4,00% cada, 10% LLMQ signatários (V4 M-4 PoSe: recuperação -5 sem penalidade por omissão no LLMQ; +5 para ADAM/coordenador primário silencioso), PoL (3x) + PoM (1,25x, α=0,25) e divisão 50/50.',
+      archPoint3Title: '3. Isolamento KTDIP3 Hot/Cold, Guarda 45s e Assinatura Sem Custódia',
       archPoint3Desc:
-        'Exige Spork ECDSA + maioria H+1 CBLSSignedData (145B Operador BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] ou 209B+ Híbrida BLS+ECDSA) com guarda 12s/30s. Sua chave WIF ou BLS (64 hex) nunca sai do navegador.'
+        'Exige Spork ECDSA + supermaioria BFT 2/3+1 H+1 CBLSSignedData (145B Operador BLS [SignBLSOperatorOnly / DeriveBLSFromCKey] ou 209B+ Híbrida BLS+ECDSA sob KRISTA_LLMQ_TREASURY_V1_) com guarda anti-equivocation de 45s. Sua chave WIF ou BLS (64 hex) nunca sai do navegador.'
     })
   })
 

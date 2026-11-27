@@ -1,13 +1,17 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { secp256k1 } from '@noble/curves/secp256k1'
+import { bls12_381 } from '@noble/curves/bls12-381'
 import {
+  BLS_DST,
+  LEGACY_BLS_DST,
   CHAIN_DEFAULTS,
   CORE_VERSION,
   PROTOCOL_VERSION,
   QUORUM_EQUIVOCATION_GUARD_SECS,
   hexToBytes,
   bytesToHex,
+  concatBytes,
   doubleSha256Bytes,
   hash160Bytes,
   calculateTxHash,
@@ -138,10 +142,12 @@ describe('treasuryCrypto — Encoding, WIF & Address Validation', () => {
     assert.equal(maskIpAddress('KTeRC2Kj8hXcuzRohxPp2LtYFRJm2BceRoP'), 'On-Chain MN')
   })
 
-  it('enforces Krista Core v1.5.9.0 (Proto 70983) dynamic LLMQ scaling (5->9->11->15), majority thresholds, and governance start heights', () => {
+  it('enforces Krista Core v1.5.9.0 (Proto 70983) dynamic LLMQ scaling (5->9->11->15), V4 2/3+1 BFT thresholds, V3 Treasury BLS_DST, and governance start heights', () => {
     assert.equal(CORE_VERSION, 'v1.5.9.0')
     assert.equal(PROTOCOL_VERSION, 70983)
-    assert.equal(QUORUM_EQUIVOCATION_GUARD_SECS, 30)
+    assert.equal(QUORUM_EQUIVOCATION_GUARD_SECS, 45)
+    assert.equal(BLS_DST, 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_KRISTA_LLMQ_TREASURY_V1_')
+    assert.equal(LEGACY_BLS_DST, 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_')
 
     assert.equal(CHAIN_DEFAULTS.main?.treasuryGovernanceStartHeight, 5000)
     assert.equal(CHAIN_DEFAULTS.test?.treasuryGovernanceStartHeight, 200)
@@ -158,13 +164,16 @@ describe('treasuryCrypto — Encoding, WIF & Address Validation', () => {
     assert.equal(getTargetQuorumSize(100), 15)
     assert.equal(getTargetQuorumSize(250), 15)
 
-    // Majority thresholds (3/5, 5/9, 6/11, 8/15)
-    assert.equal(getQuorumMajorityThreshold(5), 3)
-    assert.equal(getQuorumMajorityThreshold(9), 5)
-    assert.equal(getTargetQuorumSize(50), 11)
-    assert.equal(getQuorumMajorityThreshold(11), 6)
-    assert.equal(getQuorumMajorityThreshold(15), 8)
+    // V4 2/3+1 BFT Supermajority thresholds (4/5, 7/9, 8/11, 11/15) + edge cases
+    assert.equal(getQuorumMajorityThreshold(0), 0)
+    assert.equal(getQuorumMajorityThreshold(1), 1)
     assert.equal(getQuorumMajorityThreshold(2), 2)
+    assert.equal(getQuorumMajorityThreshold(3), 3)
+    assert.equal(getQuorumMajorityThreshold(4), 3)
+    assert.equal(getQuorumMajorityThreshold(5), 4)
+    assert.equal(getQuorumMajorityThreshold(9), 7)
+    assert.equal(getQuorumMajorityThreshold(11), 8)
+    assert.equal(getQuorumMajorityThreshold(15), 11)
 
     // Taproot normalization (lowercases 62-char Bech32m while preserving Base58Check case)
     assert.equal(
@@ -302,18 +311,21 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
     )
     assert.equal(wrongVerify.valid, false)
 
-    // Test Hybrid CBLSSignedData creation, individual verification & 3-of-5 aggregation
+    // Test Hybrid CBLSSignedData creation, individual verification & 4-of-5 V4 BFT aggregation
     const wif1 = createTestWif(0x51, true, 0x80)
     const wif2 = createTestWif(0x52, true, 0x80)
     const wif3 = createTestWif(0x53, true, 0x80)
+    const wif4 = createTestWif(0x54, true, 0x80)
     const mn1 = derivePubKeysFromWIF(wif1)
     const mn2 = derivePubKeysFromWIF(wif2)
     const mn3 = derivePubKeysFromWIF(wif3)
+    const mn4 = derivePubKeysFromWIF(wif4)
     const txHash = calculateTxHash(signedTxHex)
 
     const sig1 = createHybridBLSSignedData(mn1.privKeyHex, txHash)
     const sig2 = createHybridBLSSignedData(mn2.privKeyHex, txHash)
     const sig3 = createHybridBLSSignedData(mn3.privKeyHex, txHash)
+    const sig4 = createHybridBLSSignedData(mn4.privKeyHex, txHash)
 
     assert.equal(
       verifyAndParseBLSSignedData(sig1.signedDataHex, txHash, mn1.compressedPubKey).valid,
@@ -327,18 +339,24 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
       verifyAndParseBLSSignedData(sig3.signedDataHex, txHash, mn3.compressedPubKey).valid,
       true
     )
+    assert.equal(
+      verifyAndParseBLSSignedData(sig4.signedDataHex, txHash, mn4.compressedPubKey).valid,
+      true
+    )
 
     const aggResult = verifyAggregatedBLSSignatures(txHash, [
       { pubkey: mn1.compressedPubKey, signature: sig1.signedDataHex },
       { pubkey: mn2.compressedPubKey, signature: sig2.signedDataHex },
-      { pubkey: mn3.compressedPubKey, signature: sig3.signedDataHex }
+      { pubkey: mn3.compressedPubKey, signature: sig3.signedDataHex },
+      { pubkey: mn4.compressedPubKey, signature: sig4.signedDataHex }
     ])
     assert.equal(aggResult.valid, true)
 
     const serializedQuorumPayload = serializeQuorumSignatureBytes(txHash, [
       { txhash: '11'.repeat(32), outidx: 0, signature: sig1.signedDataHex },
       { txhash: '22'.repeat(32), outidx: 1, signature: sig2.signedDataHex },
-      { txhash: '33'.repeat(32), outidx: 0, signature: sig3.signedDataHex }
+      { txhash: '33'.repeat(32), outidx: 0, signature: sig3.signedDataHex },
+      { txhash: '44'.repeat(32), outidx: 0, signature: sig4.signedDataHex }
     ])
     const qsigPush = new Uint8Array([
       ...getPushDataPrefixBytes(serializedQuorumPayload.length),
@@ -455,6 +473,58 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
     const bloatedOpSig = sig1.signedDataHex.slice(0, -2) + '01aa'
     assert.equal(
       verifyAndParseBLSSignedData(bloatedOpSig, txHash, op1.blsPubKeyHex, op1.blsPubKeyHex).valid,
+      false
+    )
+
+    // 4-of-5 KTDIP3 operator aggregation under V3/V4 Treasury BLS_DST
+    const op3 = deriveBlsPubKeyFromSecret('33'.repeat(32))
+    const op4 = deriveBlsPubKeyFromSecret('44'.repeat(32))
+    const sig3 = createOperatorBLSSignedData(op3.blsSecretHex, txHash)
+    const sig4 = createOperatorBLSSignedData(op4.blsSecretHex, txHash)
+    const fourOfFiveAgg = verifyAggregatedBLSSignatures(txHash, [
+      { pubkey: ownerPk, operatorPubKey: op1.blsPubKeyHex, signature: sig1.signedDataHex },
+      { pubkey: ownerPk, operatorPubKey: op2.blsPubKeyHex, signature: sig2.signedDataHex },
+      { pubkey: ownerPk, operatorPubKey: op3.blsPubKeyHex, signature: sig3.signedDataHex },
+      { pubkey: ownerPk, operatorPubKey: op4.blsPubKeyHex, signature: sig4.signedDataHex }
+    ])
+    assert.equal(fourOfFiveAgg.valid, true)
+
+    // Negative compatibility: signature signed under LEGACY_BLS_DST MUST be rejected by current BLS_DST
+    const msgBlockHash = hexToBytes(txHash).reverse()
+    const legacyOpBlsSig = bls12_381.sign(msgBlockHash, hexToBytes(op1.blsSecretHex), {
+      DST: LEGACY_BLS_DST
+    })
+    const legacyOpSignedDataHex = bytesToHex(
+      concatBytes(hexToBytes(op1.blsPubKeyHex), legacyOpBlsSig, new Uint8Array([0x00]))
+    )
+    assert.equal(
+      verifyAndParseBLSSignedData(legacyOpSignedDataHex, txHash, ownerPk, op1.blsPubKeyHex).valid,
+      false
+    )
+    assert.equal(
+      verifyAggregatedBLSSignatures(txHash, [
+        { pubkey: ownerPk, operatorPubKey: op1.blsPubKeyHex, signature: legacyOpSignedDataHex },
+        { pubkey: ownerPk, operatorPubKey: op2.blsPubKeyHex, signature: sig2.signedDataHex },
+        { pubkey: ownerPk, operatorPubKey: op3.blsPubKeyHex, signature: sig3.signedDataHex },
+        { pubkey: ownerPk, operatorPubKey: op4.blsPubKeyHex, signature: sig4.signedDataHex }
+      ]).valid,
+      false
+    )
+
+    // Negative compatibility: hybrid signature signed under LEGACY_BLS_DST MUST also be rejected
+    const privBytes = hexToBytes(mnKeys.privKeyHex)
+    const hybridBlsPriv = doubleSha256Bytes(concatBytes(privBytes, msgBlockHash))
+    hybridBlsPriv[0]! &= 0x3f
+    const hybridBlsPk = bls12_381.getPublicKey(hybridBlsPriv)
+    const legacyHybridBlsSig = bls12_381.sign(msgBlockHash, hybridBlsPriv, { DST: LEGACY_BLS_DST })
+    const ecdsaAuth = secp256k1
+      .sign(doubleSha256Bytes(hybridBlsPk), privBytes, { lowS: true })
+      .toDERRawBytes()
+    const legacyHybridHex = bytesToHex(
+      concatBytes(hybridBlsPk, legacyHybridBlsSig, writeCompactSizeBytes(ecdsaAuth.length), ecdsaAuth)
+    )
+    assert.equal(
+      verifyAndParseBLSSignedData(legacyHybridHex, txHash, mnKeys.compressedPubKey).valid,
       false
     )
   })

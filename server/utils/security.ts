@@ -457,6 +457,11 @@ export async function callKristaRpc(method: string, params: any[] = []): Promise
     signal: AbortSignal.timeout(8000)
   })
   if (!response.ok) {
+    if (response.status === 403) {
+      throw new Error(
+        `RPC call ${method} failed (403 Forbidden): rejected by RPC allowlist or V4 IsAllowedHTTPRequestHost (use numeric IP / localhost, or configure -rpcbind=<hostname>)`
+      )
+    }
     throw new Error(`RPC call ${method} failed: ${response.statusText}`)
   }
   const json: any = await response.json()

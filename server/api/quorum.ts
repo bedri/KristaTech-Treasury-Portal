@@ -316,14 +316,18 @@ export default defineEventHandler(async (event) => {
         defaults.treasuryGovernanceStartHeight
     )
     const treasuryGovernanceActive = targetHeight >= treasuryGovernanceStartHeight
-    const dip3Active = upgrades.DIP3
-      ? upgrades.DIP3.status === 'active'
-      : upgrades['KTDIP3 v2']
-        ? upgrades['KTDIP3 v2'].status === 'active'
-        : targetHeight >= 1
-    const fairnessActive = upgrades.Fairness
-      ? upgrades.Fairness.status === 'active'
-      : targetHeight >= 1
+    const isUpgradeActive = (keys: string[], fallbackActive: boolean): boolean => {
+      for (const k of keys) {
+        if (upgrades[k]) {
+          return upgrades[k].status === 'active'
+        }
+      }
+      return fallbackActive
+    }
+    const dip3Active = isUpgradeActive(['DIP3', 'KTDIP3 v2'], targetHeight >= 1)
+    const fairnessActive = isUpgradeActive(['Fairness'], targetHeight >= 1)
+    const hardeningV3Active = isUpgradeActive(['Hardening v3', 'Hardening_v3'], targetHeight >= 1)
+    const hardeningV4Active = isUpgradeActive(['Hardening v4', 'Hardening_v4'], targetHeight >= 1)
 
     return {
       success: true,
@@ -342,6 +346,8 @@ export default defineEventHandler(async (event) => {
       treasuryGovernanceActive,
       dip3Active,
       fairnessActive,
+      hardeningV3Active,
+      hardeningV4Active,
       activeMasternodeCount: enabledMns.length,
       dip3MasternodeCount,
       poseBannedCount,

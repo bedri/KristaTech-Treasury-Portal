@@ -4,10 +4,11 @@ import { extract as hkdfExtract, expand as hkdfExpand } from '@noble/hashes/hkdf
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
 
-export const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
+export const LEGACY_BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_'
+export const BLS_DST = 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_KRISTA_LLMQ_TREASURY_V1_'
 export const CORE_VERSION = 'v1.5.9.0'
 export const PROTOCOL_VERSION = 70983
-export const QUORUM_EQUIVOCATION_GUARD_SECS = 30
+export const QUORUM_EQUIVOCATION_GUARD_SECS = 45
 
 export const CHAIN_DEFAULTS: Readonly<
   Record<
@@ -38,11 +39,12 @@ export const CHAIN_DEFAULTS: Readonly<
 })
 
 /**
- * Dynamic LLMQ Quorum Scaling (UPGRADE_HARDENING_V1 in src/llmq.cpp:GetTargetQuorumSize):
- *   < 25 active on-chain MNs   -> 5 members  (3/5 majority)
- *   25..49 active on-chain MNs -> 9 members  (5/9 majority)
- *   50..99 active on-chain MNs -> 11 members (6/11 majority)
- *   >= 100 active on-chain MNs -> 15 members (8/15 majority)
+ * Dynamic LLMQ Quorum Scaling (UPGRADE_HARDENING_V1 in src/llmq.cpp:GetTargetQuorumSize)
+ * with UPGRADE_HARDENING_V4 BFT Supermajority Thresholds (src/llmq.cpp:GetQuorumThreshold):
+ *   < 25 active on-chain MNs   -> 5 members  (4/5 BFT supermajority)
+ *   25..49 active on-chain MNs -> 9 members  (7/9 BFT supermajority)
+ *   50..99 active on-chain MNs -> 11 members (8/11 BFT supermajority)
+ *   >= 100 active on-chain MNs -> 15 members (11/15 BFT supermajority)
  */
 export function getTargetQuorumSize(nActiveOnChainMNs: number): number {
   const count = Math.max(0, Math.floor(Number(nActiveOnChainMNs) || 0))
@@ -53,12 +55,13 @@ export function getTargetQuorumSize(nActiveOnChainMNs: number): number {
 }
 
 /**
- * Majority threshold matching src/main.cpp:2174 and src/rpc/masternode.cpp:526:
- *   std::min<size_t>(quorumSize, std::max<size_t>(2, (quorumSize / 2) + 1))
+ * V4 BFT supermajority threshold matching src/llmq.cpp:36-44 (UPGRADE_HARDENING_V4, Height 1):
+ *   std::min<size_t>(quorumSize, std::max<size_t>(2, ((2 * quorumSize) / 3) + 1))
  */
 export function getQuorumMajorityThreshold(quorumSize: number): number {
-  const size = Math.max(1, Math.floor(Number(quorumSize) || 5))
-  return Math.min(size, Math.max(2, Math.floor(size / 2) + 1))
+  const size = Math.max(0, Math.floor(Number(quorumSize) || 0))
+  if (size <= 0) return 0
+  return Math.min(size, Math.max(2, Math.floor((2 * size) / 3) + 1))
 }
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
