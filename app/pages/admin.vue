@@ -80,8 +80,8 @@ const cliTemplate = computed(() => {
     '# 1. Create unsigned Raw Transaction spending Developer Fund UTXO:',
     `kristatech-cli createrawtransaction '[{"txid":"<DEV_FUND_UTXO_TXID>","vout":0}]' '{"${addr}":${amt},"${devFundChangeAddr}":<CHANGE_AMOUNT>}'`,
     '',
-    '# 2. Sign with the Consensus Spork Private Key (SIGHASH_ALL):',
-    `kristatech-cli signrawtransactionwithkey "<UNSIGNED_HEX>" '["<SPORK_PRIVATE_KEY_WIF>"]'`
+    '# 2. Sign with the Consensus Treasury Private Key (SIGHASH_ALL):',
+    `kristatech-cli signrawtransactionwithkey "<UNSIGNED_HEX>" '["<TREASURY_PRIVATE_KEY_WIF>"]'`
   ].join('\n')
 })
 
@@ -343,7 +343,7 @@ async function createProposal() {
         </div>
       </div>
 
-      <!-- Spork-Signed Raw Transaction Hex -->
+      <!-- Treasury-Signed Raw Transaction Hex -->
       <div
         class="krista-field-group p-4 rounded-xl bg-[var(--krista-surface)] border border-[var(--krista-border)] space-y-1.5"
       >

@@ -30,7 +30,7 @@ import {
   extractScriptSigPushesBytes,
   extractScriptSigPushesStrict,
   computeSighashAllBytes,
-  verifySporkInputSignature,
+  verifyTreasuryInputSignature,
   deriveBlsPubKeyFromSecret,
   deriveDip3BlsKeyFromEcdsaPrivKey,
   createOperatorBLSSignedData,
@@ -149,7 +149,7 @@ describe('treasuryCrypto — Encoding, WIF & Address Validation', () => {
     assert.equal(BLS_DST, 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_KRISTA_LLMQ_TREASURY_V1_')
     assert.equal(LEGACY_BLS_DST, 'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_')
 
-    assert.equal(CHAIN_DEFAULTS.main?.treasuryGovernanceStartHeight, 5000)
+    assert.equal(CHAIN_DEFAULTS.main?.treasuryGovernanceStartHeight, 200)
     assert.equal(CHAIN_DEFAULTS.test?.treasuryGovernanceStartHeight, 200)
     assert.equal(CHAIN_DEFAULTS.regtest?.treasuryGovernanceStartHeight, 100)
 
@@ -185,7 +185,7 @@ describe('treasuryCrypto — Encoding, WIF & Address Validation', () => {
   })
 })
 
-describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybrid BLS Quorum', () => {
+describe('treasuryCrypto — CompactSize, Script Push, Treasury SIGHASH_ALL & Hybrid BLS Quorum', () => {
   it('round-trips CompactSize integers across 1-byte, 3-byte, and 5-byte boundaries', () => {
     for (const val of [0, 1, 252, 253, 1024, 65535, 70000]) {
       const encoded = writeCompactSizeBytes(val)
@@ -195,19 +195,19 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
     }
   })
 
-  it('creates and verifies Spork SIGHASH_ALL input signatures and Hybrid BLS Quorum signatures', () => {
-    const sporkPrivHex = '33'.repeat(32)
-    const sporkPrivBytes = hexToBytes(sporkPrivHex)
-    const sporkPubBytes = secp256k1.getPublicKey(sporkPrivBytes, true)
-    const sporkPubHex = bytesToHex(sporkPubBytes)
-    const sporkPkh = hash160Bytes(sporkPubBytes)
+  it('creates and verifies Treasury SIGHASH_ALL input signatures and Hybrid BLS Quorum signatures', () => {
+    const treasuryPrivHex = '33'.repeat(32)
+    const treasuryPrivBytes = hexToBytes(treasuryPrivHex)
+    const treasuryPubBytes = secp256k1.getPublicKey(treasuryPrivBytes, true)
+    const treasuryPubHex = bytesToHex(treasuryPubBytes)
+    const treasuryPkh = hash160Bytes(treasuryPubBytes)
 
     // P2PKH subscript: OP_DUP OP_HASH160 <20-byte-pkh> OP_EQUALVERIFY OP_CHECKSIG
     const subScript = new Uint8Array(25)
     subScript[0] = 0x76
     subScript[1] = 0xa9
     subScript[2] = 0x14
-    subScript.set(sporkPkh, 3)
+    subScript.set(treasuryPkh, 3)
     subScript[23] = 0x88
     subScript[24] = 0xac
 
@@ -237,9 +237,9 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
       ...locktime
     ])
 
-    // Compute SIGHASH_ALL and sign with Spork private key
+    // Compute SIGHASH_ALL and sign with Treasury private key
     const sighash = computeSighashAllBytes(bytesToHex(unsignedTx), 0, subScript)
-    const ecdsaSig = secp256k1.sign(sighash, sporkPrivBytes, { lowS: true })
+    const ecdsaSig = secp256k1.sign(sighash, treasuryPrivBytes, { lowS: true })
     const derSig = ecdsaSig.toDERRawBytes()
     const sigWithHashType = new Uint8Array(derSig.length + 1)
     sigWithHashType.set(derSig, 0)
@@ -250,8 +250,8 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
       ...sigWithHashType
     ])
     const pubPush = new Uint8Array([
-      ...getPushDataPrefixBytes(sporkPubBytes.length),
-      ...sporkPubBytes
+      ...getPushDataPrefixBytes(treasuryPubBytes.length),
+      ...treasuryPubBytes
     ])
     const scriptSig = new Uint8Array([...sigPush, ...pubPush])
     const scriptSigLen = writeCompactSizeBytes(scriptSig.length)
@@ -272,23 +272,23 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
     ])
     const signedTxHex = bytesToHex(signedTxBytes)
 
-    const verified = verifySporkInputSignature(
+    const verified = verifyTreasuryInputSignature(
       signedTxHex,
       0,
       sigWithHashType,
-      sporkPubBytes,
-      sporkPubHex
+      treasuryPubBytes,
+      treasuryPubHex
     )
     assert.equal(verified.valid, true)
 
-    // Reject malleable high-S ECDSA signature in verifySporkInputSignature
+    // Reject malleable high-S ECDSA signature in verifyTreasuryInputSignature
     const highSSig = new secp256k1.Signature(ecdsaSig.r, secp256k1.CURVE.n - ecdsaSig.s)
     const highSDer = highSSig.toDERRawBytes()
     const highSSigWithHashType = new Uint8Array(highSDer.length + 1)
     highSSigWithHashType.set(highSDer, 0)
     highSSigWithHashType[highSDer.length] = 0x01
     assert.equal(
-      verifySporkInputSignature(signedTxHex, 0, highSSigWithHashType, sporkPubBytes, sporkPubHex).valid,
+      verifyTreasuryInputSignature(signedTxHex, 0, highSSigWithHashType, treasuryPubBytes, treasuryPubHex).valid,
       false
     )
 
@@ -300,13 +300,13 @@ describe('treasuryCrypto — CompactSize, Script Push, Spork SIGHASH_ALL & Hybri
     assert.equal(extractScriptSigPushesStrict('4c01aa').valid, false) // non-minimal OP_PUSHDATA1 (1 byte)
     assert.deepEqual(extractInputOutpoints(signedTxHex), ['aa'.repeat(32) + ':0'])
 
-    // Verify against a different Spork public key -> must fail
+    // Verify against a different Treasury public key -> must fail
     const otherPubBytes = secp256k1.getPublicKey(hexToBytes('44'.repeat(32)), true)
-    const wrongVerify = verifySporkInputSignature(
+    const wrongVerify = verifyTreasuryInputSignature(
       signedTxHex,
       0,
       sigWithHashType,
-      sporkPubBytes,
+      treasuryPubBytes,
       bytesToHex(otherPubBytes)
     )
     assert.equal(wrongVerify.valid, false)

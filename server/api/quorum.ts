@@ -159,9 +159,9 @@ export default defineEventHandler(async (event) => {
     // Compute live DKG height & Seed height from actual mined blocks on the chain
     let fRotationActive = false
     if (chain === 'main') {
-      fRotationActive = targetHeight >= 1400
+      fRotationActive = targetHeight >= 200
     } else if (chain === 'test') {
-      fRotationActive = targetHeight >= 1000
+      fRotationActive = targetHeight >= 200
     } else {
       fRotationActive = targetHeight >= 800
     }
@@ -175,7 +175,7 @@ export default defineEventHandler(async (event) => {
     let seedHex = ''
 
     let developerFundAddress = defaults.devFundAddr
-    let sporkPubKey = defaults.sporkPubKey
+    let treasuryPubKey = defaults.treasuryPubKey
     let quorumHash: string | undefined
 
     // Query getactivequorum FIRST so warm daemon RPC eliminates cold-start getAdamSeed amplification
@@ -186,8 +186,8 @@ export default defineEventHandler(async (event) => {
         if (activeQuorum.developerFundAddress) {
           developerFundAddress = String(activeQuorum.developerFundAddress)
         }
-        if (activeQuorum.sporkPubKey) {
-          sporkPubKey = String(activeQuorum.sporkPubKey)
+        if (activeQuorum.treasuryPubKey) {
+          treasuryPubKey = String(activeQuorum.treasuryPubKey)
         }
         if (
           typeof activeQuorum.quorumHash === 'string' &&
@@ -341,7 +341,7 @@ export default defineEventHandler(async (event) => {
       seedHeight,
       seed: seedHex,
       developerFundAddress,
-      sporkPubKey,
+      treasuryPubKey,
       treasuryGovernanceStartHeight,
       treasuryGovernanceActive,
       dip3Active,

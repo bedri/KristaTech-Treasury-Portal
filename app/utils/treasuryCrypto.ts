@@ -15,24 +15,24 @@ export const CHAIN_DEFAULTS: Readonly<
     string,
     Readonly<{
       devFundAddr: string
-      sporkPubKey: string
+      treasuryPubKey: string
       treasuryGovernanceStartHeight: number
     }>
   >
 > = Object.freeze({
   main: Object.freeze({
     devFundAddr: 'KTeRC2Kj8hXcuzRohxPp2LtYFRJm2BceRoP',
-    sporkPubKey: '024897ee03b6f8133aa5fc926c8f9fd83b1454a817fda9fc907de18866eba0030a',
-    treasuryGovernanceStartHeight: 5000
+    treasuryPubKey: '024897ee03b6f8133aa5fc926c8f9fd83b1454a817fda9fc907de18866eba0030a',
+    treasuryGovernanceStartHeight: 200
   }),
   test: Object.freeze({
     devFundAddr: 'ktEooARF3HdV8w59LUc5jaHrS7GBL7974Uy',
-    sporkPubKey: '03b4394f924c8bdbea7379fbcde9bf1b5a32d0f04631312b18c4ba3889a89b6a0d',
+    treasuryPubKey: '03b4394f924c8bdbea7379fbcde9bf1b5a32d0f04631312b18c4ba3889a89b6a0d',
     treasuryGovernanceStartHeight: 200
   }),
   regtest: Object.freeze({
     devFundAddr: 'kt5KNitasi4bEHbQQCrpy6445nJD7uSVNux',
-    sporkPubKey:
+    treasuryPubKey:
       '043969b1b0e6f327de37f297a015d37e2235eaaeeb3933deecd8162c075cee0207b13537618bde640879606001a8136091c62ec272dd0133424a178704e6e75bb7',
     treasuryGovernanceStartHeight: 100
   })
@@ -609,47 +609,47 @@ export function computeSighashAllBytes(
   return doubleSha256Bytes(concatBytes(...parts))
 }
 
-export function verifySporkInputSignature(
+export function verifyTreasuryInputSignature(
   rawTxHex: string,
   inputIndex: number,
   sigPush: Uint8Array,
   pubKeyPush: Uint8Array,
-  sporkPubKeyHex: string
+  treasuryPubKeyHex: string
 ): { valid: boolean; error?: string } {
   try {
-    if (bytesToHex(pubKeyPush).toLowerCase() !== sporkPubKeyHex.trim().toLowerCase()) {
+    if (bytesToHex(pubKeyPush).toLowerCase() !== treasuryPubKeyHex.trim().toLowerCase()) {
       return {
         valid: false,
-        error: 'Input scriptSig public key does not match consensus Spork public key'
+        error: 'Input scriptSig public key does not match consensus Treasury public key'
       }
     }
     if (sigPush.length < 9 || sigPush.length > 73) {
-      return { valid: false, error: `Invalid Spork ECDSA signature length (${sigPush.length})` }
+      return { valid: false, error: `Invalid Treasury ECDSA signature length (${sigPush.length})` }
     }
     const nHashType = sigPush[sigPush.length - 1]!
     if (nHashType !== 0x01) {
       return {
         valid: false,
-        error: `Invalid Spork signature hash type (0x${nHashType.toString(16)}); SIGHASH_ALL (0x01) is required`
+        error: `Invalid Treasury signature hash type (0x${nHashType.toString(16)}); SIGHASH_ALL (0x01) is required`
       }
     }
     const derSig = sigPush.subarray(0, sigPush.length - 1)
 
-    const sporkPubKeyBuf = hexToBytes(sporkPubKeyHex)
-    const sporkScriptCode = concatBytes(
+    const treasuryPubKeyBuf = hexToBytes(treasuryPubKeyHex)
+    const treasuryScriptCode = concatBytes(
       hexToBytes('76a914'),
-      hash160Bytes(sporkPubKeyBuf),
+      hash160Bytes(treasuryPubKeyBuf),
       hexToBytes('88ac')
     )
 
-    const sighashSpork = computeSighashAllBytes(rawTxHex, inputIndex, sporkScriptCode)
-    if (secp256k1.verify(derSig, sighashSpork, sporkPubKeyBuf, { lowS: true })) {
+    const sighashTreasury = computeSighashAllBytes(rawTxHex, inputIndex, treasuryScriptCode)
+    if (secp256k1.verify(derSig, sighashTreasury, treasuryPubKeyBuf, { lowS: true })) {
       return { valid: true }
     }
 
-    return { valid: false, error: 'Cryptographic verification of Spork ECDSA signature failed' }
+    return { valid: false, error: 'Cryptographic verification of Treasury ECDSA signature failed' }
   } catch (err: any) {
-    return { valid: false, error: `Spork signature verification error: ${err.message}` }
+    return { valid: false, error: `Treasury signature verification error: ${err.message}` }
   }
 }
 

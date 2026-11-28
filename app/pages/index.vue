@@ -40,7 +40,7 @@ interface QuorumResponse {
   seedHeight?: number
   seed?: string
   developerFundAddress?: string
-  sporkPubKey?: string
+  treasuryPubKey?: string
   treasuryGovernanceStartHeight?: number
   treasuryGovernanceActive?: boolean
   dip3Active?: boolean

@@ -26,7 +26,7 @@ import {
   serializeQuorumSignatureBytes,
   verifyAggregatedBLSSignatures,
   verifyAndParseBLSSignedData,
-  verifySporkInputSignature
+  verifyTreasuryInputSignature
 } from '../utils/treasuryCrypto'
 
 const callRpc = callKristaRpc
@@ -89,7 +89,7 @@ async function fetchActiveQuorumForSpend() {
       activeQuorum?.threshold || getQuorumMajorityThreshold(members.length || 5)
     ),
     developerFundAddress: String(activeQuorum?.developerFundAddress || defaults.devFundAddr),
-    sporkPubKey: String(activeQuorum?.sporkPubKey || defaults.sporkPubKey),
+    treasuryPubKey: String(activeQuorum?.treasuryPubKey || defaults.treasuryPubKey),
     members
   }
 }
@@ -182,7 +182,7 @@ export default defineEventHandler(async (event) => {
           }
         }
 
-        // 2. Verify rawTxHex is a valid transaction spending an unspent Developer Fund UTXO signed by Spork Key
+        // 2. Verify rawTxHex is a valid transaction spending an unspent Developer Fund UTXO signed by Treasury Key
         let decodedTx: any
         let quorumInfo: any
         try {
@@ -286,26 +286,26 @@ export default defineEventHandler(async (event) => {
             }
           }
 
-          // Check scriptSig contains strictly <sporkSig> <sporkPubKey> with no malleable trailing pushes/opcodes
+          // Check scriptSig contains strictly <treasurySig> <treasuryPubKey> with no malleable trailing pushes/opcodes
           const strictScriptSig = extractScriptSigPushesStrict(vin.scriptSig?.hex || '')
           if (!strictScriptSig.valid || strictScriptSig.pushes.length !== 2) {
             return {
               success: false,
-              error: `Input #${i} scriptSig must strictly contain <sporkSig> <sporkPubKey> (${strictScriptSig.error || 'unexpected push count'})`
+              error: `Input #${i} scriptSig must strictly contain <treasurySig> <treasuryPubKey> (${strictScriptSig.error || 'unexpected push count'})`
             }
           }
           const pushes = strictScriptSig.pushes
-          const sporkVerify = verifySporkInputSignature(
+          const treasuryVerify = verifyTreasuryInputSignature(
             cleanRawHex,
             i,
             pushes[0]!,
             pushes[1]!,
-            quorumInfo.sporkPubKey
+            quorumInfo.treasuryPubKey
           )
-          if (!sporkVerify.valid) {
+          if (!treasuryVerify.valid) {
             return {
               success: false,
-              error: `Input #${i} invalid Spork signature: ${sporkVerify.error}`
+              error: `Input #${i} invalid Treasury signature: ${treasuryVerify.error}`
             }
           }
         }
